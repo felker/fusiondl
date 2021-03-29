@@ -1,10 +1,7 @@
 import src.global_vars as g
-from src.primitives.shots import ShotListFiles
-import data.signals as sig
-from plasma.utils.hashing import myhash_signals
-# from data.signals import (
-#     all_signals, fully_defined_signals_1D,
-#     jet, d3d)  # nstx
+from src.core.primitives.shots import ShotListFiles
+import src.core.data.signals as sig
+from src.utils.hashing import myhash_signals
 import os
 import getpass
 import yaml
@@ -12,14 +9,6 @@ import yaml
 
 def parameters(input_file):
     """Parse yaml file of configuration parameters."""
-    # TODO(KGF): the following line imports TensorFlow as a Keras backend
-    # by default (absent env variable KERAS_BACKEND and/or config file
-    # $HOME/.keras/keras.json) "from plasma.conf import conf"
-    # via "import keras.backend as K" in targets.py
-    from plasma.models.targets import (
-        HingeTarget, MaxHingeTarget, BinaryTarget,
-        TTDTarget, TTDInvTarget, TTDLinearTarget
-        )
     with open(input_file, 'r') as yaml_file:
         params = yaml.load(yaml_file, Loader=yaml.SafeLoader)
         params['user_name'] = getpass.getuser()
