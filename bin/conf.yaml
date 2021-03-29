@@ -9,19 +9,21 @@
 # will output csvlog, trained model checkpoints, etc.
 # in fs_path_output / [username] / results | csv_logs | model_checkpoints | Graph, etc.
 
-fs_path: '/Users/'
-user_subdir: True
-fs_path_output: '/Users/'
-user_subdir_output: True
-target: 'hinge'
+
 num_gpus_per_node: 4
+framework: 'tensorflow2'
+precision: 'float32'
 paths:
+  fs_path: '/Users/'
+  user_subdir: True
+  fs_path_output: '/Users/'
+  user_subdir_output: True
   signal_prepath: '/signal_data/'
   shot_list_dir: '/shot_lists/'
   tensorboard_save_path: '/Graph/'
+data:
   data: d3d_0D
   specific_signals: []
-data:
   bleed_in: 0
   bleed_in_repeat_fac: 1
   bleed_in_remove_from_test: True
@@ -47,11 +49,10 @@ data:
   normalizer: 'var'
   norm_stat_range: 100.0
   equalize_classes: False
-  floatx: 'float32'
 model:
+  target: 'hinge'
   loss_scale_factor: 1.0
   use_batch_norm: false
-  torch: False
   pred_length: 200
   pred_batch_size: 128
   rnn_mem_length: 128
