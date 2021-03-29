@@ -2,9 +2,17 @@
 # note, the YAML parser will NOT evaluate expressions in the value fields.
 # e.g. "validation_frac: 1.0/3.0" will result in str value "1.0/3.0"
 
-# will do stuff in fs_path / [username] / signal_data | shot_lists | processed shots, etc.
+# will read and write (normalization, etc.) shot data
+# in fs_path / [username] / signal_data | shot_lists | processed shots, etc.
+# (username is automatically added as first subdir if user_subdir==True)
 
-fs_path: '/tigress'
+# will output csvlog, trained model checkpoints, etc.
+# in fs_path_output / [username] / results | csv_logs | model_checkpoints | Graph, etc.
+
+fs_path: '/Users/'
+user_subdir: True
+fs_path_output: '/Users/'
+user_subdir_output: True
 target: 'hinge'
 num_gpus_per_node: 4
 paths:
@@ -13,7 +21,6 @@ paths:
   tensorboard_save_path: '/Graph/'
   data: d3d_0D
   specific_signals: []
-  executable: "mpi_learn.py"
 data:
   bleed_in: 0
   bleed_in_repeat_fac: 1
@@ -80,8 +87,6 @@ training:
   num_shots_at_once: 200
   max_num_epochs: 1000
   use_mock_data: False
-  data_parallel: False
-  hyperparam_tuning: False
   batch_generator_warmup_steps: 0
   use_process_generator: False
   num_batches_minimum: 20
@@ -98,6 +103,3 @@ callbacks:
   write_grads: False
   monitor_test: True
   monitor_times: [30,70,200,500,1000]
-env:
-  name: 'frnn'
-  type: 'anaconda'
