@@ -9,9 +9,13 @@
 # will output csvlog, trained model checkpoints, etc.
 # in fs_path_output / [username] / results | csv_logs | model_checkpoints | Graph, etc.
 
+# switches determined by CLI:
+# - distributed
+# - TBD: mixed precision
+
 
 num_gpus_per_node: 4
-framework: 'tensorflow2'
+framework: 'tensorflow'
 precision: 'float32'
 paths:
   fs_path: '/Users/'
