@@ -189,7 +189,7 @@ class tf_trainer(trainercore):
 
         # unscale loss
         if conf['model']['loss_scale_factor'] != 1.0:
-            deltas = mult iply_params(
+            deltas = multiply_params(
                 deltas, 1.0/conf['model']['loss_scale_factor'])
 
         return deltas, loss
@@ -462,346 +462,345 @@ class tf_trainer(trainercore):
         return print_str
 
 
-def mpi_make_predictions(conf, shot_list, loader, custom_path=None):
-    loader.set_inference_mode(True)
-    np.random.seed(g.task_index)
-    shot_list.sort()  # make sure all replicas have the same list
-    specific_builder = builder.ModelBuilder(conf)
+    def mpi_make_predictions(conf, shot_list, loader, custom_path=None):
+        loader.set_inference_mode(True)
+        np.random.seed(g.task_index)
+        shot_list.sort()  # make sure all replicas have the same list
+        specific_builder = builder.ModelBuilder(conf)
 
-    y_prime = []
-    y_gold = []
-    disruptive = []
+        y_prime = []
+        y_gold = []
+        disruptive = []
 
-    model = specific_builder.build_model(True)
-    specific_builder.load_model_weights(model, custom_path)
+        model = specific_builder.build_model(True)
+        specific_builder.load_model_weights(model, custom_path)
 
-    # broadcast model weights then set it explicitly: fix for Py3.6
-    if g.task_index == 0:
-        new_weights = model.get_weights()
-    else:
-        new_weights = None
-    nw = g.comm.bcast(new_weights, root=0)
-    model.set_weights(nw)
-
-    model.reset_states()
-    if g.task_index == 0:
-        # TODO(KGF): this appears to prepend a \n, resulting in:
-        # [2] loading from epoch 7
-        #
-        # 128/862 [===>..........................] - ETA: 2:20
-        pbar = Progbar(len(shot_list))
-    shot_sublists = shot_list.sublists(conf['model']['pred_batch_size'],
-                                       do_shuffle=False, equal_size=True)
-    y_prime_global = []
-    y_gold_global = []
-    disruptive_global = []
-    if g.task_index != 0:
-        loader.verbose = False
-
-    for (i, shot_sublist) in enumerate(shot_sublists):
-        if i % g.num_workers == g.task_index:
-            X, y, shot_lengths, disr = loader.load_as_X_y_pred(shot_sublist)
-
-            # load data and fit on data
-            y_p = model.predict(X, batch_size=conf['model']['pred_batch_size'])
-            model.reset_states()
-            y_p = loader.batch_output_to_array(y_p)
-            y = loader.batch_output_to_array(y)
-
-            # cut arrays back
-            y_p = [arr[:shot_lengths[j]] for (j, arr) in enumerate(y_p)]
-            y = [arr[:shot_lengths[j]] for (j, arr) in enumerate(y)]
-
-            y_prime += y_p
-            y_gold += y
-            disruptive += disr
-            # print_all('\nFinished with i = {}'.format(i))
-
-        if (i % g.num_workers == g.num_workers - 1
-                or i == len(shot_sublists) - 1):
-            g.comm.Barrier()
-            y_prime_global += concatenate_sublists(g.comm.allgather(y_prime))
-            y_gold_global += concatenate_sublists(g.comm.allgather(y_gold))
-            disruptive_global += concatenate_sublists(
-                g.comm.allgather(disruptive))
-            g.comm.Barrier()
-            y_prime = []
-            y_gold = []
-            disruptive = []
-
+        # broadcast model weights then set it explicitly: fix for Py3.6
         if g.task_index == 0:
-            pbar.add(1.0*len(shot_sublist))
+            new_weights = model.get_weights()
+        else:
+            new_weights = None
+        nw = g.comm.bcast(new_weights, root=0)
+        model.set_weights(nw)
 
-    y_prime_global = y_prime_global[:len(shot_list)]
-    y_gold_global = y_gold_global[:len(shot_list)]
-    disruptive_global = disruptive_global[:len(shot_list)]
-    loader.set_inference_mode(False)
+        model.reset_states()
+        if g.task_index == 0:
+            # TODO(KGF): this appears to prepend a \n, resulting in:
+            # [2] loading from epoch 7
+            #
+            # 128/862 [===>..........................] - ETA: 2:20
+            pbar = Progbar(len(shot_list))
+        shot_sublists = shot_list.sublists(conf['model']['pred_batch_size'],
+                                           do_shuffle=False, equal_size=True)
+        y_prime_global = []
+        y_gold_global = []
+        disruptive_global = []
+        if g.task_index != 0:
+            loader.verbose = False
 
-    return y_prime_global, y_gold_global, disruptive_global
+        for (i, shot_sublist) in enumerate(shot_sublists):
+            if i % g.num_workers == g.task_index:
+                X, y, shot_lengths, disr = loader.load_as_X_y_pred(shot_sublist)
+
+                # load data and fit on data
+                y_p = model.predict(X, batch_size=conf['model']['pred_batch_size'])
+                model.reset_states()
+                y_p = loader.batch_output_to_array(y_p)
+                y = loader.batch_output_to_array(y)
+
+                # cut arrays back
+                y_p = [arr[:shot_lengths[j]] for (j, arr) in enumerate(y_p)]
+                y = [arr[:shot_lengths[j]] for (j, arr) in enumerate(y)]
+
+                y_prime += y_p
+                y_gold += y
+                disruptive += disr
+                # print_all('\nFinished with i = {}'.format(i))
+
+            if (i % g.num_workers == g.num_workers - 1
+                    or i == len(shot_sublists) - 1):
+                g.comm.Barrier()
+                y_prime_global += concatenate_sublists(g.comm.allgather(y_prime))
+                y_gold_global += concatenate_sublists(g.comm.allgather(y_gold))
+                disruptive_global += concatenate_sublists(
+                    g.comm.allgather(disruptive))
+                g.comm.Barrier()
+                y_prime = []
+                y_gold = []
+                disruptive = []
+
+            if g.task_index == 0:
+                pbar.add(1.0*len(shot_sublist))
+
+        y_prime_global = y_prime_global[:len(shot_list)]
+        y_gold_global = y_gold_global[:len(shot_list)]
+        disruptive_global = disruptive_global[:len(shot_list)]
+        loader.set_inference_mode(False)
+
+        return y_prime_global, y_gold_global, disruptive_global
 
 
-def mpi_make_predictions_and_evaluate(conf, shot_list, loader,
-                                      custom_path=None):
-    y_prime, y_gold, disruptive = mpi_make_predictions(
-        conf, shot_list, loader, custom_path)
-    analyzer = PerformanceAnalyzer(conf=conf)
-    roc_area = analyzer.get_roc_area(y_prime, y_gold, disruptive)
-    shot_list.set_weights(
-        analyzer.get_shot_difficulty(y_prime, y_gold, disruptive))
-    loss = get_loss_from_list(y_prime, y_gold, conf['data']['target'])
-    return y_prime, y_gold, disruptive, roc_area, loss
-
-
-def mpi_make_predictions_and_evaluate_multiple_times(conf, shot_list, loader,
-                                                     times, custom_path=None):
-    y_prime, y_gold, disruptive = mpi_make_predictions(conf, shot_list, loader,
-                                                       custom_path)
-    areas = []
-    losses = []
-    for T_min_curr in times:
-        # if 'monitor_test' in conf['callbacks'].keys() and
-        # conf['callbacks']['monitor_test']:
-        conf_curr = deepcopy(conf)
-        T_min_warn_orig = conf['data']['T_min_warn']
-        conf_curr['data']['T_min_warn'] = T_min_curr
-        assert conf['data']['T_min_warn'] == T_min_warn_orig
-        analyzer = PerformanceAnalyzer(conf=conf_curr)
+    def mpi_make_predictions_and_evaluate(conf, shot_list, loader,
+                                          custom_path=None):
+        y_prime, y_gold, disruptive = mpi_make_predictions(
+            conf, shot_list, loader, custom_path)
+        analyzer = PerformanceAnalyzer(conf=conf)
         roc_area = analyzer.get_roc_area(y_prime, y_gold, disruptive)
-        # shot_list.set_weights(analyzer.get_shot_difficulty(y_prime, y_gold,
-        # disruptive))
+        shot_list.set_weights(
+            analyzer.get_shot_difficulty(y_prime, y_gold, disruptive))
         loss = get_loss_from_list(y_prime, y_gold, conf['data']['target'])
-        areas.append(roc_area)
-        losses.append(loss)
-    return areas, losses
+        return y_prime, y_gold, disruptive, roc_area, loss
 
 
-def train(conf, shot_list_train, shot_list_validate, loader,
-          callbacks_list=None, shot_list_test=None):
+    def mpi_make_predictions_and_evaluate_multiple_times(conf, shot_list, loader,
+                                                         times, custom_path=None):
+        y_prime, y_gold, disruptive = mpi_make_predictions(conf, shot_list, loader,
+                                                           custom_path)
+        areas = []
+        losses = []
+        for T_min_curr in times:
+            # if 'monitor_test' in conf['callbacks'].keys() and
+            # conf['callbacks']['monitor_test']:
+            conf_curr = deepcopy(conf)
+            T_min_warn_orig = conf['data']['T_min_warn']
+            conf_curr['data']['T_min_warn'] = T_min_curr
+            assert conf['data']['T_min_warn'] == T_min_warn_orig
+            analyzer = PerformanceAnalyzer(conf=conf_curr)
+            roc_area = analyzer.get_roc_area(y_prime, y_gold, disruptive)
+            # shot_list.set_weights(analyzer.get_shot_difficulty(y_prime, y_gold,
+            # disruptive))
+            loss = get_loss_from_list(y_prime, y_gold, conf['data']['target'])
+            areas.append(roc_area)
+            losses.append(loss)
+        return areas, losses
 
-    loader.set_inference_mode(False)
 
-    # TODO(KGF): this is not defined in conf.yaml, but added to processed dict
-    # for the first time here:
-    conf['num_workers'] = g.comm.Get_size()
+    def train(conf, shot_list_train, shot_list_validate, loader,
+              callbacks_list=None, shot_list_test=None):
 
-    specific_builder = builder.ModelBuilder(conf)
-    if g.tf_ver >= parse_version('1.14.0'):
-        # Internal TensorFlow flags, subject to change (v1.14.0+ only?)
-        try:
-            from tensorflow.python.util import module_wrapper as depr
-        except ImportError:
-            from tensorflow.python.util import deprecation_wrapper as depr
-        # depr._PRINT_DEPRECATION_WARNINGS = False  # does nothing
-        depr._PER_MODULE_WARNING_LIMIT = 0
-        # Suppresses warnings from "keras/backend/tensorflow_backend.py"
-        # except: "Rate should be set to `rate = 1 - keep_prob`"
-        # Also suppresses warnings from "keras/optimizers.py
-        # does NOT suppresses warn from "/tensorflow/python/ops/math_grad.py"
-    else:
-        # TODO(KGF): next line suppresses ALL info and warning messages,
-        # not just deprecation warnings...
-        tf.logging.set_verbosity(tf.logging.ERROR)
-    # TODO(KGF): for TF>v1.13.0 (esp v1.14.0), this next line prompts a ton of
-    # deprecation warnings with externally-packaged Keras, e.g.:
-    # WARNING:tensorflow:From  .../keras/backend/tensorflow_backend.py:174:
-    # The name tf.get_default_session is deprecated.
-    # Please use tf.compat.v1.get_default_session instead.
-    train_model = specific_builder.build_model(False)
-    # Cannot fix these Keras internals via "import tensorflow.compat.v1 as tf"
-    #
-    # TODO(KGF): note, these are different than C-based info diagnostics e.g.:
-    # 2019-11-06 18:27:31.698908: I ...  dynamic library libcublas.so.10
-    # which are NOT suppressed by set_verbosity. See top level __init__.py
+        loader.set_inference_mode(False)
 
-    # load the latest epoch we did. Returns 0 if none exist yet
-    e = specific_builder.load_model_weights(train_model)
-    e_old = e
+        # TODO(KGF): this is not defined in conf.yaml, but added to processed dict
+        # for the first time here:
+        conf['num_workers'] = g.comm.Get_size()
 
-    num_epochs = conf['training']['num_epochs']
-    lr_decay = conf['model']['lr_decay']
-    batch_size = conf['training']['batch_size']
-    lr = conf['model']['lr']
-    clipnorm = conf['model']['clipnorm']
-    warmup_steps = conf['model']['warmup_steps']
-    # TODO(KGF): rename as "num_iter_minimum" or "min_steps_per_epoch"
-    num_batches_minimum = conf['training']['num_batches_minimum']
+        specific_builder = builder.ModelBuilder(conf)
+        if g.tf_ver >= parse_version('1.14.0'):
+            # Internal TensorFlow flags, subject to change (v1.14.0+ only?)
+            try:
+                from tensorflow.python.util import module_wrapper as depr
+            except ImportError:
+                from tensorflow.python.util import deprecation_wrapper as depr
+            # depr._PRINT_DEPRECATION_WARNINGS = False  # does nothing
+            depr._PER_MODULE_WARNING_LIMIT = 0
+            # Suppresses warnings from "keras/backend/tensorflow_backend.py"
+            # except: "Rate should be set to `rate = 1 - keep_prob`"
+            # Also suppresses warnings from "keras/optimizers.py
+            # does NOT suppresses warn from "/tensorflow/python/ops/math_grad.py"
+        else:
+            # TODO(KGF): next line suppresses ALL info and warning messages,
+            # not just deprecation warnings...
+            tf.logging.set_verbosity(tf.logging.ERROR)
+        # TODO(KGF): for TF>v1.13.0 (esp v1.14.0), this next line prompts a ton of
+        # deprecation warnings with externally-packaged Keras, e.g.:
+        # WARNING:tensorflow:From  .../keras/backend/tensorflow_backend.py:174:
+        # The name tf.get_default_session is deprecated.
+        # Please use tf.compat.v1.get_default_session instead.
+        train_model = specific_builder.build_model(False)
+        # Cannot fix these Keras internals via "import tensorflow.compat.v1 as tf"
+        #
+        # TODO(KGF): note, these are different than C-based info diagnostics e.g.:
+        # 2019-11-06 18:27:31.698908: I ...  dynamic library libcublas.so.10
+        # which are NOT suppressed by set_verbosity. See top level __init__.py
 
-    if 'adam' in conf['model']['optimizer']:
-        optimizer = MPIAdam(lr=lr)
-    elif (conf['model']['optimizer'] == 'sgd'
-          or conf['model']['optimizer'] == 'tf_sgd'):
-        optimizer = MPISGD(lr=lr)
-    elif 'momentum_sgd' in conf['model']['optimizer']:
-        optimizer = MPIMomentumSGD(lr=lr)
-    else:
-        print("Optimizer not implemented yet")
-        exit(1)
+        # load the latest epoch we did. Returns 0 if none exist yet
+        e = specific_builder.load_model_weights(train_model)
+        e_old = e
 
-    g.print_unique('{} epoch(s) left to go'.format(num_epochs - e))
+        num_epochs = conf['training']['num_epochs']
+        lr_decay = conf['model']['lr_decay']
+        batch_size = conf['training']['batch_size']
+        lr = conf['model']['lr']
+        clipnorm = conf['model']['clipnorm']
+        warmup_steps = conf['model']['warmup_steps']
+        # TODO(KGF): rename as "num_iter_minimum" or "min_steps_per_epoch"
+        num_batches_minimum = conf['training']['num_batches_minimum']
 
-    batch_generator = partial(loader.training_batch_generator_partial_reset,
-                              shot_list=shot_list_train)
+        if 'adam' in conf['model']['optimizer']:
+            optimizer = MPIAdam(lr=lr)
+        elif (conf['model']['optimizer'] == 'sgd'):
+            optimizer = MPISGD(lr=lr)
+        elif 'momentum_sgd' in conf['model']['optimizer']:
+            optimizer = MPIMomentumSGD(lr=lr)
+        else:
+            print("Optimizer not implemented yet")
+            exit(1)
 
-    g.print_unique("warmup steps = {}".format(warmup_steps))
-    mpi_model = MPIModel(train_model, optimizer, g.comm, batch_generator,
-                         batch_size, lr=lr, warmup_steps=warmup_steps,
-                         num_batches_minimum=num_batches_minimum, conf=conf)
-    mpi_model.compile(conf['model']['optimizer'], clipnorm,
-                      conf['data']['target'].loss)
-    tensorboard = None
-    if g.task_index == 0:
-        tensorboard_save_path = conf['paths']['tensorboard_save_path']
-        write_grads = conf['callbacks']['write_grads']
-        tensorboard = TensorBoard(log_dir=tensorboard_save_path,
-                                  histogram_freq=1, # write_graph=True,
-                                  write_grads=write_grads)
-        tensorboard.set_model(mpi_model.model)
-        # TODO(KGF): check addition of TF model summary write added from fork
-        fr = open('model_architecture.log', 'a')
-        ori = sys.stdout
-        sys.stdout = fr
-        mpi_model.model.summary()
-        sys.stdout = ori
-        fr.close()
-        mpi_model.model.summary()
+        g.print_unique('{} epoch(s) left to go'.format(num_epochs - e))
 
-    if g.task_index == 0:
-        callbacks = mpi_model.build_callbacks(conf, callbacks_list)
-        callbacks.set_model(mpi_model.model)
-        callback_metrics = conf['callbacks']['metrics']
-        callbacks.set_params({'epochs': num_epochs,
-                              'metrics': callback_metrics,
-                              'batch_size': batch_size, })
-        callbacks.on_train_begin()
-    if conf['callbacks']['mode'] == 'max':
-        best_so_far = -np.inf
-        cmp_fn = max
-    else:
-        best_so_far = np.inf
-        cmp_fn = min
+        batch_generator = partial(loader.training_batch_generator_partial_reset,
+                                  shot_list=shot_list_train)
 
-    while e < num_epochs:
-        g.write_unique('\nBegin training from epoch {:.2f}/{}'.format(
-            e, num_epochs))
+        g.print_unique("warmup steps = {}".format(warmup_steps))
+        mpi_model = MPIModel(train_model, optimizer, g.comm, batch_generator,
+                             batch_size, lr=lr, warmup_steps=warmup_steps,
+                             num_batches_minimum=num_batches_minimum, conf=conf)
+        mpi_model.compile(conf['model']['optimizer'], clipnorm,
+                          conf['data']['target'].loss)
+        tensorboard = None
         if g.task_index == 0:
-            callbacks.on_epoch_begin(int(round(e)))
-        mpi_model.set_lr(lr*lr_decay**e)
+            tensorboard_save_path = conf['paths']['tensorboard_save_path']
+            write_grads = conf['callbacks']['write_grads']
+            tensorboard = TensorBoard(log_dir=tensorboard_save_path,
+                                      histogram_freq=1, # write_graph=True,
+                                      write_grads=write_grads)
+            tensorboard.set_model(mpi_model.model)
+            # TODO(KGF): check addition of TF model summary write added from fork
+            fr = open('model_architecture.log', 'a')
+            ori = sys.stdout
+            sys.stdout = fr
+            mpi_model.model.summary()
+            sys.stdout = ori
+            fr.close()
+            mpi_model.model.summary()
 
-        # KGF: core work of loop performed in next line
-        (step, ave_loss, curr_loss, num_so_far,
-         effective_epochs) = mpi_model.train_epoch()
-        e = e_old + effective_epochs
-        g.write_unique('Finished training of epoch {:.2f}/{}\n'.format(
-            e, num_epochs))
-
-        # TODO(KGF): add diagnostic about "saving to epoch X"?
-        loader.verbose = False  # True during the first iteration
         if g.task_index == 0:
-            specific_builder.save_model_weights(train_model, int(round(e)))
+            callbacks = mpi_model.build_callbacks(conf, callbacks_list)
+            callbacks.set_model(mpi_model.model)
+            callback_metrics = conf['callbacks']['metrics']
+            callbacks.set_params({'epochs': num_epochs,
+                                  'metrics': callback_metrics,
+                                  'batch_size': batch_size, })
+            callbacks.on_train_begin()
+        if conf['callbacks']['mode'] == 'max':
+            best_so_far = -np.inf
+            cmp_fn = max
+        else:
+            best_so_far = np.inf
+            cmp_fn = min
 
-        if conf['training']['no_validation']:
-            break
+        while e < num_epochs:
+            g.write_unique('\nBegin training from epoch {:.2f}/{}'.format(
+                e, num_epochs))
+            if g.task_index == 0:
+                callbacks.on_epoch_begin(int(round(e)))
+            mpi_model.set_lr(lr*lr_decay**e)
 
-        epoch_logs = {}
-        g.write_unique('Begin evaluation of epoch {:.2f}/{}\n'.format(
-            e, num_epochs))
-        # TODO(KGF): flush output/ MPI barrier?
-        # g.flush_all_inorder()
+            # KGF: core work of loop performed in next line
+            (step, ave_loss, curr_loss, num_so_far,
+             effective_epochs) = mpi_model.train_epoch()
+            e = e_old + effective_epochs
+            g.write_unique('Finished training of epoch {:.2f}/{}\n'.format(
+                e, num_epochs))
 
-        # TODO(KGF): is there a way to avoid Keras.Models.load_weights()
-        # repeated calls throughout mpi_make_pred*() fn calls?
-        _, _, _, roc_area, loss = mpi_make_predictions_and_evaluate(
-            conf, shot_list_validate, loader)
+            # TODO(KGF): add diagnostic about "saving to epoch X"?
+            loader.verbose = False  # True during the first iteration
+            if g.task_index == 0:
+                specific_builder.save_model_weights(train_model, int(round(e)))
 
-        if conf['training']['ranking_difficulty_fac'] != 1.0:
-            (_, _, _, roc_area_train,
-             loss_train) = mpi_make_predictions_and_evaluate(
-                 conf, shot_list_train, loader)
-            batch_generator = partial(
-                loader.training_batch_generator_partial_reset,
-                shot_list=shot_list_train)
-            mpi_model.batch_iterator = batch_generator
-            mpi_model.batch_iterator_func.__exit__()
-            mpi_model.num_so_far_accum = mpi_model.num_so_far_indiv
-            mpi_model.set_batch_iterator_func()
+            if conf['training']['no_validation']:
+                break
 
-        if ('monitor_test' in conf['callbacks'].keys()
-                and conf['callbacks']['monitor_test']):
-            times = conf['callbacks']['monitor_times']
-            areas, _ = mpi_make_predictions_and_evaluate_multiple_times(
-                conf, shot_list_validate, loader, times)
-            epoch_str = 'epoch {}, '.format(int(round(e)))
-            g.write_unique(epoch_str + ' '.join(
-                ['val_roc_{} = {}'.format(t, roc) for t, roc in zip(
-                    times, areas)]
-                ) + '\n')
-            if shot_list_test is not None:
+            epoch_logs = {}
+            g.write_unique('Begin evaluation of epoch {:.2f}/{}\n'.format(
+                e, num_epochs))
+            # TODO(KGF): flush output/ MPI barrier?
+            # g.flush_all_inorder()
+
+            # TODO(KGF): is there a way to avoid Keras.Models.load_weights()
+            # repeated calls throughout mpi_make_pred*() fn calls?
+            _, _, _, roc_area, loss = mpi_make_predictions_and_evaluate(
+                conf, shot_list_validate, loader)
+
+            if conf['training']['ranking_difficulty_fac'] != 1.0:
+                (_, _, _, roc_area_train,
+                 loss_train) = mpi_make_predictions_and_evaluate(
+                     conf, shot_list_train, loader)
+                batch_generator = partial(
+                    loader.training_batch_generator_partial_reset,
+                    shot_list=shot_list_train)
+                mpi_model.batch_iterator = batch_generator
+                mpi_model.batch_iterator_func.__exit__()
+                mpi_model.num_so_far_accum = mpi_model.num_so_far_indiv
+                mpi_model.set_batch_iterator_func()
+
+            if ('monitor_test' in conf['callbacks'].keys()
+                    and conf['callbacks']['monitor_test']):
+                times = conf['callbacks']['monitor_times']
                 areas, _ = mpi_make_predictions_and_evaluate_multiple_times(
-                    conf, shot_list_test, loader, times)
+                    conf, shot_list_validate, loader, times)
+                epoch_str = 'epoch {}, '.format(int(round(e)))
                 g.write_unique(epoch_str + ' '.join(
-                    ['test_roc_{} = {}'.format(t, roc) for t, roc in zip(
+                    ['val_roc_{} = {}'.format(t, roc) for t, roc in zip(
                         times, areas)]
                     ) + '\n')
+                if shot_list_test is not None:
+                    areas, _ = mpi_make_predictions_and_evaluate_multiple_times(
+                        conf, shot_list_test, loader, times)
+                    g.write_unique(epoch_str + ' '.join(
+                        ['test_roc_{} = {}'.format(t, roc) for t, roc in zip(
+                            times, areas)]
+                        ) + '\n')
 
-        epoch_logs['val_roc'] = roc_area
-        epoch_logs['val_loss'] = loss
-        epoch_logs['train_loss'] = ave_loss
-        best_so_far = cmp_fn(epoch_logs[conf['callbacks']['monitor']],
-                             best_so_far)
-        stop_training = False
-        g.flush_all_inorder()
+            epoch_logs['val_roc'] = roc_area
+            epoch_logs['val_loss'] = loss
+            epoch_logs['train_loss'] = ave_loss
+            best_so_far = cmp_fn(epoch_logs[conf['callbacks']['monitor']],
+                                 best_so_far)
+            stop_training = False
+            g.flush_all_inorder()
+            if g.task_index == 0:
+                print('=========Summary======== for epoch {:.2f}'.format(e))
+                print('Training Loss numpy: {:.3e}'.format(ave_loss))
+                print('Validation Loss: {:.3e}'.format(loss))
+                print('Validation ROC: {:.4f}'.format(roc_area))
+                if conf['training']['ranking_difficulty_fac'] != 1.0:
+                    print('Training Loss: {:.3e}'.format(loss_train))
+                    print('Training ROC: {:.4f}'.format(roc_area_train))
+                print('======================== ')
+                callbacks.on_epoch_end(int(round(e)), epoch_logs)
+                if hasattr(mpi_model.model, 'stop_training'):
+                    stop_training = mpi_model.model.stop_training
+                # only save model weights if quantity we are tracking is improving
+                if best_so_far != epoch_logs[conf['callbacks']['monitor']]:
+                    if ('monitor_test' in conf['callbacks'].keys()
+                            and conf['callbacks']['monitor_test']):
+                        print("No improvement, saving model weights anyways")
+                    else:
+                        print("Not saving model weights")
+                        specific_builder.delete_model_weights(
+                            train_model, int(round(e)))
+
+                # tensorboard
+                val_generator = partial(loader.training_batch_generator,
+                                        shot_list=shot_list_validate)()
+                val_steps = 1
+                tensorboard.on_epoch_end(val_generator, val_steps,
+                                         int(round(e)), epoch_logs)
+            stop_training = g.comm.bcast(stop_training, root=0)
+            g.write_unique('Finished evaluation of epoch {:.2f}/{}'.format(
+                e, num_epochs))
+            # TODO(KGF): compare to old diagnostic:
+            # g.write_unique("end epoch {}".format(e_old))
+            if stop_training:
+                g.write_unique("Stopping training due to early stopping")
+                break
+
         if g.task_index == 0:
-            print('=========Summary======== for epoch {:.2f}'.format(e))
-            print('Training Loss numpy: {:.3e}'.format(ave_loss))
-            print('Validation Loss: {:.3e}'.format(loss))
-            print('Validation ROC: {:.4f}'.format(roc_area))
-            if conf['training']['ranking_difficulty_fac'] != 1.0:
-                print('Training Loss: {:.3e}'.format(loss_train))
-                print('Training ROC: {:.4f}'.format(roc_area_train))
-            print('======================== ')
-            callbacks.on_epoch_end(int(round(e)), epoch_logs)
-            if hasattr(mpi_model.model, 'stop_training'):
-                stop_training = mpi_model.model.stop_training
-            # only save model weights if quantity we are tracking is improving
-            if best_so_far != epoch_logs[conf['callbacks']['monitor']]:
-                if ('monitor_test' in conf['callbacks'].keys()
-                        and conf['callbacks']['monitor_test']):
-                    print("No improvement, saving model weights anyways")
-                else:
-                    print("Not saving model weights")
-                    specific_builder.delete_model_weights(
-                        train_model, int(round(e)))
+            callbacks.on_train_end()
+            tensorboard.on_train_end()
 
-            # tensorboard
-            val_generator = partial(loader.training_batch_generator,
-                                    shot_list=shot_list_validate)()
-            val_steps = 1
-            tensorboard.on_epoch_end(val_generator, val_steps,
-                                     int(round(e)), epoch_logs)
-        stop_training = g.comm.bcast(stop_training, root=0)
-        g.write_unique('Finished evaluation of epoch {:.2f}/{}'.format(
-            e, num_epochs))
-        # TODO(KGF): compare to old diagnostic:
-        # g.write_unique("end epoch {}".format(e_old))
-        if stop_training:
-            g.write_unique("Stopping training due to early stopping")
-            break
-
-    if g.task_index == 0:
-        callbacks.on_train_end()
-        tensorboard.on_train_end()
-
-    mpi_model.close()
+        mpi_model.close()
 
 
-def get_stop_training(callbacks):
-    # TODO(KGF): this funciton is unused
-    for cb in callbacks.callbacks:
-        if isinstance(cb, tf.keras.callbacks.EarlyStopping):
-            print("Checking for early stopping")
-            return cb.model.stop_training
-    print("No early stopping callback found.")
-    return False
+    def get_stop_training(callbacks):
+        # TODO(KGF): this funciton is unused
+        for cb in callbacks.callbacks:
+            if isinstance(cb, tf.keras.callbacks.EarlyStopping):
+                print("Checking for early stopping")
+                return cb.model.stop_training
+        print("No early stopping callback found.")
+        return False
 
 
 class TensorBoard(object):
@@ -902,9 +901,6 @@ class ModelBuilder(object):
         return (np.array(indices_0d).astype(np.int32),
                 np.array(indices_1d).astype(np.int32), num_0D, num_1D)
 
-    def build_train_test_models(self):
-        return self.build_model(False), self.build_model(True)
-
     def save_model_weights(self, model, epoch):
         # Keras HDF5 weights only
         save_path = self.get_save_path(epoch)
@@ -997,6 +993,151 @@ class ModelBuilder(object):
             if curr_id == unique_id:
                 epochs.append(epoch)
         return epochs
+
+
+    from copy import deepcopy
+from src.utils.hashing import general_object_hash
+from src.models.tensorflow.tcn import TCN
+# TODO(KGF): consider using importlib.util.find_spec() instead (Py>3.4)
+try:
+    import keras2onnx
+    import onnx
+except ImportError:  # as e:
+    _has_onnx = False
+    # onnx = None
+    # keras2onnx = None
+else:
+    _has_onnx = True
+
+# Synchronize 2x stderr msg from TensorFlow initialization via Keras backend
+# "Succesfully opened dynamic library... libcudart" "Using TensorFlow backend."
+if g.comm is not None:
+    g.flush_all_inorder()
+
+
+def build_model(self, predict):
+    conf = self.conf
+    model_conf = conf['model']
+    rnn_size = model_conf['rnn_size']
+    rnn_type = model_conf['rnn_type']
+    regularization = model_conf['regularization']
+    dense_regularization = model_conf['dense_regularization']
+
+    dropout_prob = model_conf['dropout_prob']
+    length = model_conf['length']
+    pred_length = model_conf['pred_length']
+    # skip = model_conf['skip']
+    stateful = model_conf['stateful']
+    return_sequences = model_conf['return_sequences']
+    # model_conf['output_activation']
+    output_activation = conf['data']['target'].activation
+    use_signals = conf['paths']['use_signals']
+    num_signals = sum([sig.num_channels for sig in use_signals])
+    num_conv_filters = model_conf['num_conv_filters']
+    # num_conv_layers = model_conf['num_conv_layers']
+    size_conv_filters = model_conf['size_conv_filters']
+    pool_size = model_conf['pool_size']
+    dense_size = model_conf['dense_size']
+
+    batch_size = self.conf['training']['batch_size']
+    if predict:
+        batch_size = self.conf['model']['pred_batch_size']
+        # so we can predict with one time point at a time!
+        if return_sequences:
+            length = pred_length
+        else:
+            length = 1
+
+    if rnn_type == 'LSTM':
+        rnn_model = LSTM
+    elif rnn_type == 'SimpleRNN':
+        rnn_model = SimpleRNN
+    else:
+        print('Unkown Model Type, exiting.')
+        exit(1)
+
+    batch_input_shape = (batch_size, length, num_signals)
+
+    indices_0d, indices_1d, num_0D, num_1D = self.get_0D_1D_indices()
+
+    # def slicer(x, indices):
+    #     return x[:, indices]
+
+    # def slicer_output_shape(input_shape, indices):
+    #     shape_curr = list(input_shape)
+    #     assert len(shape_curr) == 2  # only valid for 3D tensors
+    #     shape_curr[-1] = len(indices)
+    #     return tuple(shape_curr)
+
+    pre_rnn_input = Input(shape=(num_signals,))
+
+    # if num_1D > 0:
+
+    # else:
+    #     pre_rnn = pre_rnn_input
+
+
+    pre_rnn_model = tf.keras.Model(inputs=pre_rnn_input, outputs=pre_rnn)
+    x_input = Input(batch_shape=batch_input_shape)
+    # TODO(KGF): Ge moved this inside a new conditional in Dec 2019. check
+    # x_in = TimeDistributed(pre_rnn_model)(x_input)
+    if num_1D > 0:
+        x_in = TimeDistributed(pre_rnn_model)(x_input)
+    else:
+        x_in = x_input
+
+    # ==========
+    # TCN MODEL
+    # ==========
+    if ('keras_tcn' in model_conf.keys()
+            and model_conf['keras_tcn'] is True):
+        print('Building TCN model....')
+        tcn_layers = model_conf['tcn_layers']
+        tcn_dropout = model_conf['tcn_dropout']
+        nb_filters = model_conf['tcn_hidden']
+        kernel_size = model_conf['kernel_size_temporal']
+        nb_stacks = model_conf['tcn_nbstacks']
+        use_skip_connections = model_conf['tcn_skip_connect']
+        activation = model_conf['tcn_activation']
+        use_batch_norm = model_conf['tcn_batch_norm']
+        for _ in range(model_conf['tcn_pack_layers']):
+            x_in = TCN(
+                use_batch_norm=use_batch_norm, activation=activation,
+                use_skip_connections=use_skip_connections,
+                nb_stacks=nb_stacks, kernel_size=kernel_size,
+                nb_filters=nb_filters, num_layers=tcn_layers,
+                dropout_rate=tcn_dropout)(x_in)
+            x_in = Dropout(dropout_prob)(x_in)
+    else:  # end TCN model
+        # ==========
+        # RNN MODEL
+        # ==========
+        # LSTM in ONNX: "The maximum opset needed by this model is only 9."
+        rnn_kwargs = dict(return_sequences=return_sequences,
+                          # batch_input_shape=batch_input_shape,
+                          stateful=stateful,
+                          kernel_regularizer=l2(regularization),
+                          recurrent_regularizer=l2(regularization),
+                          bias_regularizer=l2(regularization),
+                          dropout=dropout_prob,
+                          )
+        # https://stackoverflow.com/questions/60468385/is-there-cudnnlstm-or-cudnngru-alternative-in-tensorflow-2-0
+        # https://github.com/tensorflow/tensorflow/blob/r2.1/tensorflow/python/keras/layers/recurrent_v2.py#L902
+        if rnn_type != 'CuDNNLSTM':
+            # Recurrent Dropout is unsupported in CuDNN library
+            rnn_kwargs['recurrent_dropout'] = dropout_prob
+        for _ in range(model_conf['rnn_layers']):
+            x_in = rnn_model(rnn_size, **rnn_kwargs)(x_in)
+            # KGF: is this redundant with the dropout within the LSTM cell?
+            x_in = Dropout(dropout_prob)(x_in)
+        if return_sequences:
+            x_out = TimeDistributed(
+                Dense(1, activation=output_activation))(x_in)
+    model = tf.keras.Model(inputs=x_input, outputs=x_out)
+    model.reset_states()
+    return model
+
+
  class LossHistory(Callback):
     def on_train_begin(self, logs=None):
         self.losses = []
