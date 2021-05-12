@@ -1,3 +1,4 @@
+from abc import ABC
 import os
 import sys
 import time
@@ -20,24 +21,49 @@ import pathlib
 # are the only functions in the base class doing any heavy lifting
 
 
-class trainercore(object):
+class trainercore(ABC):
     '''
-    This class is the core interface for training.  Each function to
+    This class is the core interface for training.
+
+    CosmicTagger: "Each function to
     be overridden for a particular interface is marked and raises
-    a NotImplemented error.
+    a NotImplemented error." (not actually true, they just use "pass")
+
 
     '''
 
 
-    def __init__(self, args):
+    def __init__(self, conf):
+        self.conf = conf
+        self.start_time = time.time()
+        self.epoch = 0
+        self.num_so_far = 0
+        self.num_so_far_accum = 0
+        self.num_so_far_indiv = 0
+        self.max_lr = 0.1
+        self.lr = self.max_lr
 
-        self._iteration    = 0
-        self._global_step  = 0
-        self.args          = args
+        # if args.data.data_format == "channels_first": self._channels_dim = 1
+        # if args.data.data_format == "channels_last" : self._channels_dim = -1
 
-        if args.data.data_format == "channels_first": self._channels_dim = 1
-        if args.data.data_format == "channels_last" : self._channels_dim = -1
+    def set_batch_iterator_func(self):
+        if (self.conf is not None
+                and 'use_process_generator' in conf['training']
+                and conf['training']['use_process_generator']):
+            self.batch_iterator_func = ProcessGenerator(self.batch_iterator())
+        else:
+            self.batch_iterator_func = self.batch_iterator()
 
+    def close(self):
+        # TODO(KGF): extend __exit__() fn capability when this member
+        # = self.batch_iterator() (i.e. is not a ProcessGenerator())
+        if (self.conf is not None
+              and 'use_process_generator' in conf['training']
+              and conf['training']['use_process_generator']):
+            self.batch_iterator_func.__exit__()
+
+    def set_lr(self, lr):
+        self.lr = lr
 
     def print(self, *argv):
         ''' Function for logging as needed.  Works correctly in distributed mode'''
@@ -124,10 +150,10 @@ class trainercore(object):
             [c(x * (self.args.run.minibatch_size / self._train_data_size)) for c in cond_list], func_list)
 
 
-    def init_network(self):
+    def build_model(self):
         pass
 
-    def print_network_info(self):
+    def print_model_info(self):
         pass
 
     def set_compute_parameters(self):
@@ -174,7 +200,61 @@ class trainercore(object):
     def close_savers(self):
         pass
 
+    def save_model_weights(self, model, epoch):
+        pass
+
+    def get_save_path(self, epoch, ext='h5'):
+        pass
+
+    def extract_id_and_epoch_from_filename(self, filename):
+        pass
+
+    def delete_model_weights(self, model, epoch):
+        save_path = self.get_save_path(epoch)
+        assert os.path.exists(save_path)
+        os.remove(save_path)
+
+    def ensure_save_directory(self):
+        prepath = self.conf['paths']['model_save_path']
+        makedirs_process_safe(prepath)
+
+    def load_model_weights(self, model, custom_path=None):
+        if custom_path is None:
+            epochs = self.get_all_saved_files()
+            if len(epochs) == 0:
+                g.write_all('no previous checkpoint found\n')
+                # TODO(KGF): port indexing change (from "return -1") to parts
+                # of the code other than mpi_runner.py
+                return 0
+            else:
+                max_epoch = max(epochs)
+                g.write_all('loading from epoch {}\n'.format(max_epoch))
+                model.load_weights(self.get_save_path(max_epoch))
+                return max_epoch
+        else:
+            epoch = self.extract_id_and_epoch_from_filename(
+                os.path.basename(custom_path))[1]
+            model.load_weights(custom_path)
+            g.write_all("Loading from custom epoch {}\n".format(epoch))
+            return epoch
+
+    def get_all_saved_files(self):
+        self.ensure_save_directory()
+        unique_id = self.get_unique_id()
+        path = self.conf['paths']['model_save_path']
+        # TODO(KGF): probably should only list .h5 file, not ONNX right now
+        filenames = [name for name in os.listdir(path)
+                     if os.path.isfile(os.path.join(path, name))]
+        epochs = []
+        for fname in filenames:
+            curr_id, epoch = self.extract_id_and_epoch_from_filename(fname)
+            if curr_id == unique_id:
+                epochs.append(epoch)
+        return epochs
+
+
     def batch_process(self):
+        # KGF: main training loop, called in exec.py
 
         for self._iteration in range(self.args.run.iterations):
             if self.args.mode.name == "train" and self._iteration >= self.args.run.iterations:
@@ -191,6 +271,105 @@ class trainercore(object):
                 self.ana_step()
 
         self.close_savers()
+
+    def get_unique_id(self):
+        ''' Hash nearly the entire conf.yaml for a unique model ID for writing results
+        (not the same as the unique hash ID for input signals, etc., which barely depends
+        on conf.yaml)
+        '''
+
+        this_conf = deepcopy(self.conf)
+        # ignore hash depednecy on number of epochs or T_min_warn (they are
+        # both modifiable). Map local copy of all confs to the same values
+        this_conf['training']['num_epochs'] = 0
+        this_conf['data']['T_min_warn'] = 30
+        unique_id = general_object_hash(this_conf)
+        return unique_id
+
+    def get_0D_1D_indices(self):
+        # make sure all 1D indices are contiguous in the end!
+        use_signals = self.conf['paths']['use_signals']
+        # KGF: above requires that conf processor already has changed the default empty
+        # list of "use_signals" to include all the valid ones
+        indices_0d = []
+        indices_1d = []
+        num_0D = 0
+        num_1D = 0
+        curr_idx = 0
+        # do we have any 1D indices?
+        is_1D_region = use_signals[0].num_channels > 1
+        for sig in use_signals:
+            num_channels = sig.num_channels
+            indices = range(curr_idx, curr_idx+num_channels)
+            if num_channels > 1:
+                indices_1d += indices
+                num_1D += 1
+                is_1D_region = True
+            else:
+                assert not is_1D_region, (
+                    "Check that use_signals are ordered with 1D signals last!")
+                assert num_channels == 1
+                indices_0d += indices
+                num_0D += 1
+                is_1D_region = False
+            curr_idx += num_channels
+        return (np.array(indices_0d).astype(np.int32),
+                np.array(indices_1d).astype(np.int32), num_0D, num_1D)
+
+
+    def estimate_remaining_time(self, time_so_far, work_so_far, work_total):
+        eps = 1e-6
+        total_time = 1.0*time_so_far*work_total/(work_so_far + eps)
+        return total_time - time_so_far
+
+    # def get_effective_lr(self, num_replicas):
+    #     effective_lr = self.lr * num_replicas
+    #     if effective_lr > self.max_lr:
+    #         g.write_unique(
+    #             'Warning: effective learning rate set to {}, '.format(
+    #                 effective_lr)
+    #             + 'larger than maximum {}. Clipping.'.format(self.max_lr))
+    #         effective_lr = self.max_lr
+    #     return effective_lr
+
+    # def get_effective_batch_size(self, num_replicas):
+    #     return self.batch_size*num_replicas
+
+    def calculate_speed(self, t0, t_after_deltas, t_after_update, num_replicas,
+                        verbose=False):
+        effective_batch_size = self.get_effective_batch_size(num_replicas)
+        t_calculate = t_after_deltas - t0
+        t_sync = t_after_update - t_after_deltas
+        t_tot = t_after_update - t0
+
+        examples_per_sec = effective_batch_size/t_tot
+        frac_calculate = t_calculate/t_tot
+        frac_sync = t_sync/t_tot
+
+        print_str = ('{:.2E} Examples/sec | {:.2E} sec/batch '.format(
+            examples_per_sec, t_tot)
+                     + '[{:.1%} calc., {:.1%} sync.]'.format(
+                         frac_calculate, frac_sync))
+        print_str += '[batch = {} = {}*{}] [lr = {:.2E} = {:.2E}*{}]'.format(
+            effective_batch_size, self.batch_size, num_replicas,
+            self.get_effective_lr(num_replicas), self.lr, num_replicas)
+        if verbose:
+            g.write_unique(print_str)
+        return print_str
+
+    def add_noise(self, X):
+        if self.conf['training']['noise'] is True:
+            prob = 0.05
+        else:
+            prob = self.conf['training']['noise']
+        for i in range(0, X.shape[0]):
+            for j in range(0, X.shape[2]):
+                a = random.randint(0, 100)
+                if a < prob*100:
+                    X[i, :, j] = 0.0
+        return X
+
+
 
 
 def makedirs_process_safe(dirpath):

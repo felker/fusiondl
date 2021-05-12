@@ -2,9 +2,11 @@ import src.global_vars as g
 from src.utils.processing import concatenate_sublists
 from src.utils.evaluation import get_loss_from_list
 
-from src.core.trainercore import trainercore
-from src.models.tensorflow import TCN, FRNN, LossCalculator, AccuracyCalculator
+from src.core.trainercore import trainercore, makedirs_process_safe
+from src.utils.hashing import general_object_hash
 
+from src.models.tensorflow import custom_loss, targets, input_1D
+from src.models.tensorflow.tcn import TCN
 # from src.models.loader import ProcessGenerator
 # from src.utils.state_reset import reset_states
 
@@ -14,15 +16,29 @@ import sys
 import time
 import datetime
 import numpy as np
-
-from tensorflow.python.client import timeline
-from functools import partial
 from copy import deepcopy
+from functools import partial
+from tqdm import tqdm
 
-# TODO(KGF): remove the next 3 lines?
-# import keras sequentially because it otherwise reads from ~/.keras/keras.json
-# with too many threads:
-# from mpi_launch_tensorflow import get_mpi_task_index
+
+import tensorflow as tf
+from tensorflow.python.client import timeline
+
+# TODO(KGF): consider using importlib.util.find_spec() instead (Py>3.4)
+try:
+    import keras2onnx
+    import onnx
+except ImportError:  # as e:
+    _has_onnx = False
+    # onnx = None
+    # keras2onnx = None
+else:
+    _has_onnx = True
+
+# Synchronize 2x stderr msg from TensorFlow initialization via Keras backend
+# "Succesfully opened dynamic library... libcudart" "Using TensorFlow backend."
+if g.comm is not None:
+    g.flush_all_inorder()
 
 # set global variables for entire module regarding MPI & GPU environment
 g.init_GPU_backend(conf)
@@ -39,12 +55,6 @@ if g.NUM_GPUS > 1:
 
 # "tensorflow" package on PyPI has GPU support as of 2.1.0
 g.tf_ver = parse_version(get_distribution('tensorflow').version)
-
-# g.flush_all_inorder()
-# g.pprint_unique(conf)
-# g.flush_all_inorder()
-# g.comm.Barrier()
-
 
 
 class Averager(object):
@@ -66,20 +76,15 @@ class Averager(object):
 
 class tf_trainer(trainercore):
     def __init__(self, model, optimizer, batch_iterator, batch_size,
-                 num_replicas=None, warmup_steps=1000, lr=0.01,
-                 num_batches_minimum=100, conf=None):
+                 warmup_steps=1000, lr=0.01,
+                 num_batches_minimum=100,
+                 conf=None):
+        super().__init__(self, conf)
+
         random.seed(g.task_index)
         np.random.seed(g.task_index)
-        self.conf = conf
-        self.start_time = time.time()
-        self.epoch = 0
-        self.num_so_far = 0
-        self.num_so_far_accum = 0
-        self.num_so_far_indiv = 0
         self.model = model
         self.optimizer = optimizer
-        self.max_lr = 0.1
-
         self.batch_size = batch_size
         self.batch_iterator = batch_iterator
         self.set_batch_iterator_func()
@@ -87,34 +92,143 @@ class tf_trainer(trainercore):
         self.num_batches_minimum = num_batches_minimum
         self.history = tf.keras.callbacks.History()
         self.model.stop_training = False
-        if (num_replicas is None or num_replicas < 1
-                or num_replicas > self.num_workers):
-            self.num_replicas = self.num_workers
+        # if (num_replicas is None or num_replicas < 1
+        #         or num_replicas > self.num_workers):
+        #     self.num_replicas = self.num_workers
+        # else:
+        #     self.num_replicas = num_replicas
+        # self.lr = (lr/(1.0 + self.num_replicas/100.0) if (lr < self.max_lr)
+        #            else self.max_lr/(1.0 + self.num_replicas/100.0))
+        self.lr = (lr if (lr < self.max_lr) else self.max_lr)
+
+    def build_model(self, predict=False):
+        # TODO(KGF): switch predict to "training" boolean like CosmicTagger
+        # Is it even necessary in the build_model phase?
+        conf = self.conf
+        model_conf = conf['model']
+        rnn_size = model_conf['rnn_size']
+        rnn_type = model_conf['rnn_type']
+        regularization = model_conf['regularization']
+        dense_regularization = model_conf['dense_regularization']
+
+        dropout_prob = model_conf['dropout_prob']
+        length = model_conf['length']
+        pred_length = model_conf['pred_length']
+        # skip = model_conf['skip']
+        stateful = model_conf['stateful']
+        return_sequences = model_conf['return_sequences']
+        # model_conf['output_activation']
+        output_activation = conf['data']['target'].activation
+        use_signals = conf['paths']['use_signals']
+        num_signals = sum([sig.num_channels for sig in use_signals])
+        num_conv_filters = model_conf['num_conv_filters']
+        # num_conv_layers = model_conf['num_conv_layers']
+        size_conv_filters = model_conf['size_conv_filters']
+        pool_size = model_conf['pool_size']
+        dense_size = model_conf['dense_size']
+
+        batch_size = self.conf['training']['batch_size']
+        if predict:
+            batch_size = self.conf['model']['pred_batch_size']
+            # so we can predict with one time point at a time!
+            if return_sequences:
+                length = pred_length
+            else:
+                length = 1
+
+        if rnn_type == 'LSTM':
+            rnn_model = LSTM
+        elif rnn_type == 'SimpleRNN':
+            rnn_model = SimpleRNN
         else:
-            self.num_replicas = num_replicas
-        self.lr = (lr/(1.0 + self.num_replicas/100.0) if (lr < self.max_lr)
-                   else self.max_lr/(1.0 + self.num_replicas/100.0))
+            print('Unkown Model Type, exiting.')
+            exit(1)
 
-    def set_batch_iterator_func(self):
-        if (self.conf is not None
-                and 'use_process_generator' in conf['training']
-                and conf['training']['use_process_generator']):
-            self.batch_iterator_func = ProcessGenerator(self.batch_iterator())
+        batch_input_shape = (batch_size, length, num_signals)
+
+        indices_0d, indices_1d, num_0D, num_1D = self.get_0D_1D_indices()
+
+        pre_rnn_input = tf.keras.layers.Input(shape=(num_signals,))
+
+        if num_1D > 0:
+            pre_rnn = input_1D.InputBlock(num_conv_filters,
+                                          size_conv_filters,
+                                          indices_1d,
+                                          indices_0d,
+                                          model_conf)
         else:
-            self.batch_iterator_func = self.batch_iterator()
+            pre_rnn = pre_rnn_input
 
-    def close(self):
-        # TODO(KGF): extend __exit__() fn capability when this member
-        # = self.batch_iterator() (i.e. is not a ProcessGenerator())
-        if (self.conf is not None
-                and 'use_process_generator' in conf['training']
-                and conf['training']['use_process_generator']):
-            self.batch_iterator_func.__exit__()
+        pre_rnn_model = tf.keras.Model(inputs=pre_rnn_input, outputs=pre_rnn)
+        x_input = Input(batch_shape=batch_input_shape)
+        # TODO(KGF): Ge moved this inside a new conditional in Dec 2019. check
+        # x_in = TimeDistributed(pre_rnn_model)(x_input)
+        if num_1D > 0:
+            x_in = TimeDistributed(pre_rnn_model)(x_input)
+        else:
+            x_in = x_input
 
-    def set_lr(self, lr):
-        self.lr = lr
+        if ('keras_tcn' in model_conf.keys()
+                and model_conf['keras_tcn'] is True):
+            # ==========
+            # TCN MODEL
+            # ==========
+            # TODO(KGF): all of the following TCN keys are missing from default conf.yaml
+            print('Building TCN model....')
+            tcn_layers = model_conf['tcn_layers']
+            tcn_dropout = model_conf['tcn_dropout']
+            nb_filters = model_conf['tcn_hidden']
+            kernel_size = model_conf['kernel_size_temporal']
+            nb_stacks = model_conf['tcn_nbstacks']
+            use_skip_connections = model_conf['tcn_skip_connect']
+            activation = model_conf['tcn_activation']
+            use_batch_norm = model_conf['tcn_batch_norm']
+            for _ in range(model_conf['tcn_pack_layers']):
+                x_in = TCN(
+                    use_batch_norm=use_batch_norm,
+                    activation=activation,
+                    use_skip_connections=use_skip_connections,
+                    nb_stacks=nb_stacks,
+                    kernel_size=kernel_size,
+                    nb_filters=nb_filters,
+                    num_layers=tcn_layers,
+                    dropout_rate=tcn_dropout)(x_in)
+                x_in = Dropout(dropout_prob)(x_in)
+        else:
+            # ==========
+            # RNN MODEL
+            # ==========
+            print('Building RNN model....')
+            # LSTM in ONNX: "The maximum opset needed by this model is only 9."
+            rnn_kwargs = dict(return_sequences=return_sequences,
+                              # batch_input_shape=batch_input_shape,
+                              stateful=stateful,
+                              kernel_regularizer=l2(regularization),
+                              recurrent_regularizer=l2(regularization),
+                              bias_regularizer=l2(regularization),
+                              dropout=dropout_prob,
+                              recurrent_dropout=dropout_prob,
+                              )
+            # TF 2.x deprecated importable layer implementations like CuDNNLSTM
+            # Requirements for LSTM using CuDNNLSTM implementation:
+            # https://stackoverflow.com/questions/60468385/is-there-cudnnlstm-or-cudnngru-alternative-in-tensorflow-2-0
+            # https://github.com/tensorflow/tensorflow/blob/r2.1/tensorflow/python/keras/layers/recurrent_v2.py#L902
+            #
+            # (Recurrent Dropout is unsupported in CuDNN library)
+            for _ in range(model_conf['rnn_layers']):
+                x_in = rnn_model(rnn_size, **rnn_kwargs)(x_in)
+                # KGF: is this redundant with the dropout within the LSTM cell?
+                x_in = Dropout(dropout_prob)(x_in)
+            if return_sequences:
+                x_out = TimeDistributed(
+                    Dense(1, activation=output_activation))(x_in)
+        model = tf.keras.Model(inputs=x_input, outputs=x_out)
+        # TODO(KGF): do we really need to reset_states here?
+        model.reset_states()
+        return model
 
-    def compile(self, optimizer, clipnorm, loss='mse'):
+
+    def compile_model(self, optimizer, clipnorm, loss='mse'):
         # TODO(KGF): why was self.DUMMY_LR used in this function?
         if optimizer == 'sgd':
             optimizer_class = tf.keras.optimizers.SGD(lr=self.lr, clipnorm=clipnorm)
@@ -256,21 +370,10 @@ class tf_trainer(trainercore):
 
         return tf.keras.callbacks.CallbackList(callbacks)
 
-    def add_noise(self, X):
-        if self.conf['training']['noise'] is True:
-            prob = 0.05
-        else:
-            prob = self.conf['training']['noise']
-        for i in range(0, X.shape[0]):
-            for j in range(0, X.shape[2]):
-                a = random.randint(0, 100)
-                if a < prob*100:
-                    X[i, :, j] = 0.0
-        return X
 
     def train_epoch(self):
         '''
-        Perform distributed mini-batch SGD for one epoch. It takes the batch
+        Train model for one epoch. It takes the batch
         iterator function and a model, fetches mini-batches in a while-loop
         until number of samples seen by the ensemble of workers (num_so_far)
         exceeds the training dataset size (num_total).
@@ -345,8 +448,8 @@ class tf_trainer(trainercore):
             warmup_phase = (step < self.warmup_steps and self.epoch == 0)
             num_replicas = 1 if warmup_phase else self.num_replicas
 
-            self.num_so_far = self.mpi_sum_scalars(
-                self.num_so_far_indiv, num_replicas)
+            # self.num_so_far = self.mpi_sum_scalars(
+            #     self.num_so_far_indiv, num_replicas)
 
             # run the model once to force compilation. Don't actually use these
             # values.
@@ -357,7 +460,7 @@ class tf_trainer(trainercore):
                 #   print('output_dimension:',batch_ys.shape)
                 _, _ = self.train_on_batch_and_get_deltas(
                     batch_xs, batch_ys, verbose)
-                self.comm.Barrier()
+                # self.comm.Barrier()
                 sys.stdout.flush()
                 # TODO(KGF): check line feed/carriage returns around this
                 g.print_unique('\nCompilation finished in {:.2f}s'.format(
@@ -378,7 +481,8 @@ class tf_trainer(trainercore):
                 self.set_new_weights(deltas, num_replicas)
                 t2 = time.time()
                 write_str_0 = self.calculate_speed(t0, t1, t2, num_replicas)
-                curr_loss = self.mpi_average_scalars(1.0*loss, num_replicas)
+                curr_loss = loss
+                # curr_loss = self.mpi_average_scalars(1.0*loss, num_replicas)
                 # g.print_unique(self.model.get_weights()[0][0][:4])
                 loss_averager.add_val(curr_loss)
                 ave_loss = loss_averager.get_ave()
@@ -421,52 +525,12 @@ class tf_trainer(trainercore):
             + ' in {:.2f} seconds\n'.format(t2 - t_start))
         return (step, ave_loss, curr_loss, self.num_so_far, effective_epochs)
 
-    def estimate_remaining_time(self, time_so_far, work_so_far, work_total):
-        eps = 1e-6
-        total_time = 1.0*time_so_far*work_total/(work_so_far + eps)
-        return total_time - time_so_far
 
-    def get_effective_lr(self, num_replicas):
-        effective_lr = self.lr * num_replicas
-        if effective_lr > self.max_lr:
-            g.write_unique(
-                'Warning: effective learning rate set to {}, '.format(
-                    effective_lr)
-                + 'larger than maximum {}. Clipping.'.format(self.max_lr))
-            effective_lr = self.max_lr
-        return effective_lr
-
-    def get_effective_batch_size(self, num_replicas):
-        return self.batch_size*num_replicas
-
-    def calculate_speed(self, t0, t_after_deltas, t_after_update, num_replicas,
-                        verbose=False):
-        effective_batch_size = self.get_effective_batch_size(num_replicas)
-        t_calculate = t_after_deltas - t0
-        t_sync = t_after_update - t_after_deltas
-        t_tot = t_after_update - t0
-
-        examples_per_sec = effective_batch_size/t_tot
-        frac_calculate = t_calculate/t_tot
-        frac_sync = t_sync/t_tot
-
-        print_str = ('{:.2E} Examples/sec | {:.2E} sec/batch '.format(
-            examples_per_sec, t_tot)
-                     + '[{:.1%} calc., {:.1%} sync.]'.format(
-                         frac_calculate, frac_sync))
-        print_str += '[batch = {} = {}*{}] [lr = {:.2E} = {:.2E}*{}]'.format(
-            effective_batch_size, self.batch_size, num_replicas,
-            self.get_effective_lr(num_replicas), self.lr, num_replicas)
-        if verbose:
-            g.write_unique(print_str)
-        return print_str
-
-
-    def mpi_make_predictions(conf, shot_list, loader, custom_path=None):
+    def predict(conf, shot_list, loader, custom_path=None):
         loader.set_inference_mode(True)
         np.random.seed(g.task_index)
         shot_list.sort()  # make sure all replicas have the same list
-        specific_builder = builder.ModelBuilder(conf)
+        # specific_builder = builder.ModelBuilder(conf)
 
         y_prime = []
         y_gold = []
@@ -480,8 +544,8 @@ class tf_trainer(trainercore):
             new_weights = model.get_weights()
         else:
             new_weights = None
-        nw = g.comm.bcast(new_weights, root=0)
-        model.set_weights(nw)
+        # nw = g.comm.bcast(new_weights, root=0)
+        # model.set_weights(nw)
 
         model.reset_states()
         if g.task_index == 0:
@@ -489,7 +553,7 @@ class tf_trainer(trainercore):
             # [2] loading from epoch 7
             #
             # 128/862 [===>..........................] - ETA: 2:20
-            pbar = Progbar(len(shot_list))
+            pbar = tqdm(total=len(shot_list))
         shot_sublists = shot_list.sublists(conf['model']['pred_batch_size'],
                                            do_shuffle=False, equal_size=True)
         y_prime_global = []
@@ -530,7 +594,8 @@ class tf_trainer(trainercore):
                 disruptive = []
 
             if g.task_index == 0:
-                pbar.add(1.0*len(shot_sublist))
+                pbar.update(1.0*len(shot_sublist))
+        pbar.close()
 
         y_prime_global = y_prime_global[:len(shot_list)]
         y_gold_global = y_gold_global[:len(shot_list)]
@@ -540,9 +605,9 @@ class tf_trainer(trainercore):
         return y_prime_global, y_gold_global, disruptive_global
 
 
-    def mpi_make_predictions_and_evaluate(conf, shot_list, loader,
+    def make_predictions_and_evaluate(conf, shot_list, loader,
                                           custom_path=None):
-        y_prime, y_gold, disruptive = mpi_make_predictions(
+        y_prime, y_gold, disruptive = make_predictions(
             conf, shot_list, loader, custom_path)
         analyzer = PerformanceAnalyzer(conf=conf)
         roc_area = analyzer.get_roc_area(y_prime, y_gold, disruptive)
@@ -552,9 +617,9 @@ class tf_trainer(trainercore):
         return y_prime, y_gold, disruptive, roc_area, loss
 
 
-    def mpi_make_predictions_and_evaluate_multiple_times(conf, shot_list, loader,
+    def make_predictions_and_evaluate_multiple_times(conf, shot_list, loader,
                                                          times, custom_path=None):
-        y_prime, y_gold, disruptive = mpi_make_predictions(conf, shot_list, loader,
+        y_prime, y_gold, disruptive = make_predictions(conf, shot_list, loader,
                                                            custom_path)
         areas = []
         losses = []
@@ -577,14 +642,12 @@ class tf_trainer(trainercore):
 
     def train(conf, shot_list_train, shot_list_validate, loader,
               callbacks_list=None, shot_list_test=None):
-
         loader.set_inference_mode(False)
 
         # TODO(KGF): this is not defined in conf.yaml, but added to processed dict
         # for the first time here:
-        conf['num_workers'] = g.comm.Get_size()
+        conf['num_workers'] = 1  # g.comm.Get_size()
 
-        specific_builder = builder.ModelBuilder(conf)
         if g.tf_ver >= parse_version('1.14.0'):
             # Internal TensorFlow flags, subject to change (v1.14.0+ only?)
             try:
@@ -606,7 +669,7 @@ class tf_trainer(trainercore):
         # WARNING:tensorflow:From  .../keras/backend/tensorflow_backend.py:174:
         # The name tf.get_default_session is deprecated.
         # Please use tf.compat.v1.get_default_session instead.
-        train_model = specific_builder.build_model(False)
+        train_model = self.build_model(predict=False)
         # Cannot fix these Keras internals via "import tensorflow.compat.v1 as tf"
         #
         # TODO(KGF): note, these are different than C-based info diagnostics e.g.:
@@ -614,7 +677,7 @@ class tf_trainer(trainercore):
         # which are NOT suppressed by set_verbosity. See top level __init__.py
 
         # load the latest epoch we did. Returns 0 if none exist yet
-        e = specific_builder.load_model_weights(train_model)
+        e = self.load_model_weights(train_model)
         e_old = e
 
         num_epochs = conf['training']['num_epochs']
@@ -626,52 +689,40 @@ class tf_trainer(trainercore):
         # TODO(KGF): rename as "num_iter_minimum" or "min_steps_per_epoch"
         num_batches_minimum = conf['training']['num_batches_minimum']
 
-        if 'adam' in conf['model']['optimizer']:
-            optimizer = MPIAdam(lr=lr)
-        elif (conf['model']['optimizer'] == 'sgd'):
-            optimizer = MPISGD(lr=lr)
-        elif 'momentum_sgd' in conf['model']['optimizer']:
-            optimizer = MPIMomentumSGD(lr=lr)
-        else:
-            print("Optimizer not implemented yet")
-            exit(1)
-
         g.print_unique('{} epoch(s) left to go'.format(num_epochs - e))
 
         batch_generator = partial(loader.training_batch_generator_partial_reset,
                                   shot_list=shot_list_train)
 
         g.print_unique("warmup steps = {}".format(warmup_steps))
-        mpi_model = MPIModel(train_model, optimizer, g.comm, batch_generator,
-                             batch_size, lr=lr, warmup_steps=warmup_steps,
-                             num_batches_minimum=num_batches_minimum, conf=conf)
-        mpi_model.compile(conf['model']['optimizer'], clipnorm,
-                          conf['data']['target'].loss)
+        # mpi_model = MPIModel(train_model, optimizer, g.comm, batch_generator,
+        #                      batch_size, lr=lr, warmup_steps=warmup_steps,
+        #                      num_batches_minimum=num_batches_minimum, conf=conf)
+        self.compile_model(conf['model']['optimizer'], clipnorm,
+                     conf['data']['target'].loss)
         tensorboard = None
-        if g.task_index == 0:
-            tensorboard_save_path = conf['paths']['tensorboard_save_path']
-            write_grads = conf['callbacks']['write_grads']
-            tensorboard = TensorBoard(log_dir=tensorboard_save_path,
-                                      histogram_freq=1, # write_graph=True,
-                                      write_grads=write_grads)
-            tensorboard.set_model(mpi_model.model)
-            # TODO(KGF): check addition of TF model summary write added from fork
-            fr = open('model_architecture.log', 'a')
-            ori = sys.stdout
-            sys.stdout = fr
-            mpi_model.model.summary()
-            sys.stdout = ori
-            fr.close()
-            mpi_model.model.summary()
+        # if g.task_index == 0:
+        tensorboard_save_path = conf['paths']['tensorboard_save_path']
+        write_grads = conf['callbacks']['write_grads']
+        tensorboard = TensorBoard(log_dir=tensorboard_save_path,
+                                  histogram_freq=1, # write_graph=True,
+                                  write_grads=write_grads)
+        tensorboard.set_model(self.model)
 
-        if g.task_index == 0:
-            callbacks = mpi_model.build_callbacks(conf, callbacks_list)
-            callbacks.set_model(mpi_model.model)
-            callback_metrics = conf['callbacks']['metrics']
-            callbacks.set_params({'epochs': num_epochs,
-                                  'metrics': callback_metrics,
-                                  'batch_size': batch_size, })
-            callbacks.on_train_begin()
+        # write model summary to file and stdout
+        with open('model_architecture.log','a') as fh:
+            # Pass the file handle in as a lambda function to make it callable
+            model.summary(line_length=100, print_fn=lambda x: fh.write(x + '\n'))
+        self.model.summary()
+
+        callbacks = self.build_callbacks(conf, callbacks_list)
+        callbacks.set_model(self.model)
+        callback_metrics = conf['callbacks']['metrics']
+        callbacks.set_params({'epochs': num_epochs,
+                              'metrics': callback_metrics,
+                              'batch_size': batch_size, })
+        callbacks.on_train_begin()
+        # end if g.task_index == 0:
         if conf['callbacks']['mode'] == 'max':
             best_so_far = -np.inf
             cmp_fn = max
@@ -684,11 +735,11 @@ class tf_trainer(trainercore):
                 e, num_epochs))
             if g.task_index == 0:
                 callbacks.on_epoch_begin(int(round(e)))
-            mpi_model.set_lr(lr*lr_decay**e)
+            self.set_lr(lr*lr_decay**e)
 
             # KGF: core work of loop performed in next line
             (step, ave_loss, curr_loss, num_so_far,
-             effective_epochs) = mpi_model.train_epoch()
+             effective_epochs) = self.train_epoch()
             e = e_old + effective_epochs
             g.write_unique('Finished training of epoch {:.2f}/{}\n'.format(
                 e, num_epochs))
@@ -719,10 +770,10 @@ class tf_trainer(trainercore):
                 batch_generator = partial(
                     loader.training_batch_generator_partial_reset,
                     shot_list=shot_list_train)
-                mpi_model.batch_iterator = batch_generator
-                mpi_model.batch_iterator_func.__exit__()
-                mpi_model.num_so_far_accum = mpi_model.num_so_far_indiv
-                mpi_model.set_batch_iterator_func()
+                self.batch_iterator = batch_generator
+                self.batch_iterator_func.__exit__()
+                self.num_so_far_accum = self.num_so_far_indiv
+                self.set_batch_iterator_func()
 
             if ('monitor_test' in conf['callbacks'].keys()
                     and conf['callbacks']['monitor_test']):
@@ -759,8 +810,8 @@ class tf_trainer(trainercore):
                     print('Training ROC: {:.4f}'.format(roc_area_train))
                 print('======================== ')
                 callbacks.on_epoch_end(int(round(e)), epoch_logs)
-                if hasattr(mpi_model.model, 'stop_training'):
-                    stop_training = mpi_model.model.stop_training
+                if hasattr(self.model, 'stop_training'):
+                    stop_training = self.model.stop_training
                 # only save model weights if quantity we are tracking is improving
                 if best_so_far != epoch_logs[conf['callbacks']['monitor']]:
                     if ('monitor_test' in conf['callbacks'].keys()
@@ -790,8 +841,7 @@ class tf_trainer(trainercore):
             callbacks.on_train_end()
             tensorboard.on_train_end()
 
-        mpi_model.close()
-
+        self.close()
 
     def get_stop_training(callbacks):
         # TODO(KGF): this funciton is unused
@@ -801,6 +851,56 @@ class tf_trainer(trainercore):
                 return cb.model.stop_training
         print("No early stopping callback found.")
         return False
+
+    def save_model_weights(self, model, epoch):
+        # Keras HDF5 weights only
+        save_path = self.get_save_path(epoch)
+        model.save_weights(save_path, overwrite=True)
+        # Keras light-weight HDF5 format: model arch, weights, compile info
+        full_model_save_path = self.get_save_path(epoch, ext='hdf5')
+        model.save(full_model_save_path,
+                   overwrite=True,  # default
+                   include_optimizer=True,  # default
+                   save_format=None,  # default, 'h5' in r1.15. Else 'tf'
+                   signatures=None,  # applicable to 'tf' SavedModel format only
+                   )
+        # TensorFlow SavedModel format (full directory)
+        full_model_save_dir = full_model_save_path.rsplit('.', 1)[0]
+        # TODO(KGF): model.save(..., save_format='tf') disabled in r1.15
+        # Same with tf.keras.models.save_model(..., save_format="tf").
+        # Need to use experimental API until r2.x
+        model.save(full_model_save_dir, overwrite=True, save_format='tf')
+
+        # try:
+        if _has_onnx:
+            save_path = self.get_save_path(epoch, ext='onnx')
+            onnx_model = keras2onnx.convert_keras(model, model.name,
+                                                  target_opset=10)
+            onnx.save_model(onnx_model, save_path)
+        # except Exception as e:
+        #     print(e)
+        return
+
+    def get_save_path(self, epoch, ext='h5'):
+        unique_id = self.get_unique_id()
+        dir_path = self.conf['paths']['model_save_path']
+        # TODO(KGF): consider storing .onnx files in subdirectory away from .h5
+        # if ext == 'onnx':
+        #     os.path.join(dir_path, 'onnx/')
+        return os.path.join(
+            dir_path, 'model.{}._epoch_.{}.{}'.format(unique_id, epoch, ext))
+
+    def extract_id_and_epoch_from_filename(self, filename):
+        regex = re.compile(r'-?\d+')
+        numbers = [int(x) for x in regex.findall(filename)]
+        # TODO: should ignore any files that dont match our naming convention
+        # in this directory, especially since we are now writing full .hdf5 too.
+        # Will crash the program if, e.g., a .tgz file is in that directory
+        if filename[-3:] == '.h5':
+            assert len(numbers) == 3  # id, epoch number, and .h5 extension
+            assert numbers[2] == 5  # .h5 extension
+        return numbers[0], numbers[1]
+
 
 
 class TensorBoard(object):
@@ -860,285 +960,7 @@ class TensorBoard(object):
         self.writer.close()
 
 
-class ModelBuilder(object):
-    def __init__(self, conf):
-        self.conf = conf
-
-    def get_unique_id(self):
-        this_conf = deepcopy(self.conf)
-        # ignore hash depednecy on number of epochs or T_min_warn (they are
-        # both modifiable). Map local copy of all confs to the same values
-        this_conf['training']['num_epochs'] = 0
-        this_conf['data']['T_min_warn'] = 30
-        unique_id = general_object_hash(this_conf)
-        return unique_id
-
-    def get_0D_1D_indices(self):
-        # make sure all 1D indices are contiguous in the end!
-        use_signals = self.conf['paths']['use_signals']
-        indices_0d = []
-        indices_1d = []
-        num_0D = 0
-        num_1D = 0
-        curr_idx = 0
-        # do we have any 1D indices?
-        is_1D_region = use_signals[0].num_channels > 1
-        for sig in use_signals:
-            num_channels = sig.num_channels
-            indices = range(curr_idx, curr_idx+num_channels)
-            if num_channels > 1:
-                indices_1d += indices
-                num_1D += 1
-                is_1D_region = True
-            else:
-                assert not is_1D_region, (
-                    "Check that use_signals are ordered with 1D signals last!")
-                assert num_channels == 1
-                indices_0d += indices
-                num_0D += 1
-                is_1D_region = False
-            curr_idx += num_channels
-        return (np.array(indices_0d).astype(np.int32),
-                np.array(indices_1d).astype(np.int32), num_0D, num_1D)
-
-    def save_model_weights(self, model, epoch):
-        # Keras HDF5 weights only
-        save_path = self.get_save_path(epoch)
-        model.save_weights(save_path, overwrite=True)
-        # Keras light-weight HDF5 format: model arch, weights, compile info
-        full_model_save_path = self.get_save_path(epoch, ext='hdf5')
-        model.save(full_model_save_path,
-                   overwrite=True,  # default
-                   include_optimizer=True,  # default
-                   save_format=None,  # default, 'h5' in r1.15. Else 'tf'
-                   signatures=None,  # applicable to 'tf' SavedModel format only
-                   )
-        # TensorFlow SavedModel format (full directory)
-        full_model_save_dir = full_model_save_path.rsplit('.', 1)[0]
-        # TODO(KGF): model.save(..., save_format='tf') disabled in r1.15
-        # Same with tf.keras.models.save_model(..., save_format="tf").
-        # Need to use experimental API until r2.x
-        model.save(full_model_save_dir, overwrite=True, save_format='tf')
-
-        # try:
-        if _has_onnx:
-            save_path = self.get_save_path(epoch, ext='onnx')
-            onnx_model = keras2onnx.convert_keras(model, model.name,
-                                                  target_opset=10)
-            onnx.save_model(onnx_model, save_path)
-        # except Exception as e:
-        #     print(e)
-        return
-
-    def delete_model_weights(self, model, epoch):
-        save_path = self.get_save_path(epoch)
-        assert os.path.exists(save_path)
-        os.remove(save_path)
-
-    def get_save_path(self, epoch, ext='h5'):
-        unique_id = self.get_unique_id()
-        dir_path = self.conf['paths']['model_save_path']
-        # TODO(KGF): consider storing .onnx files in subdirectory away from .h5
-        # if ext == 'onnx':
-        #     os.path.join(dir_path, 'onnx/')
-        return os.path.join(
-            dir_path, 'model.{}._epoch_.{}.{}'.format(unique_id, epoch, ext))
-
-    def ensure_save_directory(self):
-        prepath = self.conf['paths']['model_save_path']
-        makedirs_process_safe(prepath)
-
-    def load_model_weights(self, model, custom_path=None):
-        if custom_path is None:
-            epochs = self.get_all_saved_files()
-            if len(epochs) == 0:
-                g.write_all('no previous checkpoint found\n')
-                # TODO(KGF): port indexing change (from "return -1") to parts
-                # of the code other than mpi_runner.py
-                return 0
-            else:
-                max_epoch = max(epochs)
-                g.write_all('loading from epoch {}\n'.format(max_epoch))
-                model.load_weights(self.get_save_path(max_epoch))
-                return max_epoch
-        else:
-            epoch = self.extract_id_and_epoch_from_filename(
-                os.path.basename(custom_path))[1]
-            model.load_weights(custom_path)
-            g.write_all("Loading from custom epoch {}\n".format(epoch))
-            return epoch
-
-
-    def extract_id_and_epoch_from_filename(self, filename):
-        regex = re.compile(r'-?\d+')
-        numbers = [int(x) for x in regex.findall(filename)]
-        # TODO: should ignore any files that dont match our naming convention
-        # in this directory, especially since we are now writing full .hdf5 too.
-        # Will crash the program if, e.g., a .tgz file is in that directory
-        if filename[-3:] == '.h5':
-            assert len(numbers) == 3  # id, epoch number, and .h5 extension
-            assert numbers[2] == 5  # .h5 extension
-        return numbers[0], numbers[1]
-
-    def get_all_saved_files(self):
-        self.ensure_save_directory()
-        unique_id = self.get_unique_id()
-        path = self.conf['paths']['model_save_path']
-        # TODO(KGF): probably should only list .h5 file, not ONNX right now
-        filenames = [name for name in os.listdir(path)
-                     if os.path.isfile(os.path.join(path, name))]
-        epochs = []
-        for fname in filenames:
-            curr_id, epoch = self.extract_id_and_epoch_from_filename(fname)
-            if curr_id == unique_id:
-                epochs.append(epoch)
-        return epochs
-
-
-    from copy import deepcopy
-from src.utils.hashing import general_object_hash
-from src.models.tensorflow.tcn import TCN
-# TODO(KGF): consider using importlib.util.find_spec() instead (Py>3.4)
-try:
-    import keras2onnx
-    import onnx
-except ImportError:  # as e:
-    _has_onnx = False
-    # onnx = None
-    # keras2onnx = None
-else:
-    _has_onnx = True
-
-# Synchronize 2x stderr msg from TensorFlow initialization via Keras backend
-# "Succesfully opened dynamic library... libcudart" "Using TensorFlow backend."
-if g.comm is not None:
-    g.flush_all_inorder()
-
-
-def build_model(self, predict):
-    conf = self.conf
-    model_conf = conf['model']
-    rnn_size = model_conf['rnn_size']
-    rnn_type = model_conf['rnn_type']
-    regularization = model_conf['regularization']
-    dense_regularization = model_conf['dense_regularization']
-
-    dropout_prob = model_conf['dropout_prob']
-    length = model_conf['length']
-    pred_length = model_conf['pred_length']
-    # skip = model_conf['skip']
-    stateful = model_conf['stateful']
-    return_sequences = model_conf['return_sequences']
-    # model_conf['output_activation']
-    output_activation = conf['data']['target'].activation
-    use_signals = conf['paths']['use_signals']
-    num_signals = sum([sig.num_channels for sig in use_signals])
-    num_conv_filters = model_conf['num_conv_filters']
-    # num_conv_layers = model_conf['num_conv_layers']
-    size_conv_filters = model_conf['size_conv_filters']
-    pool_size = model_conf['pool_size']
-    dense_size = model_conf['dense_size']
-
-    batch_size = self.conf['training']['batch_size']
-    if predict:
-        batch_size = self.conf['model']['pred_batch_size']
-        # so we can predict with one time point at a time!
-        if return_sequences:
-            length = pred_length
-        else:
-            length = 1
-
-    if rnn_type == 'LSTM':
-        rnn_model = LSTM
-    elif rnn_type == 'SimpleRNN':
-        rnn_model = SimpleRNN
-    else:
-        print('Unkown Model Type, exiting.')
-        exit(1)
-
-    batch_input_shape = (batch_size, length, num_signals)
-
-    indices_0d, indices_1d, num_0D, num_1D = self.get_0D_1D_indices()
-
-    # def slicer(x, indices):
-    #     return x[:, indices]
-
-    # def slicer_output_shape(input_shape, indices):
-    #     shape_curr = list(input_shape)
-    #     assert len(shape_curr) == 2  # only valid for 3D tensors
-    #     shape_curr[-1] = len(indices)
-    #     return tuple(shape_curr)
-
-    pre_rnn_input = Input(shape=(num_signals,))
-
-    # if num_1D > 0:
-
-    # else:
-    #     pre_rnn = pre_rnn_input
-
-
-    pre_rnn_model = tf.keras.Model(inputs=pre_rnn_input, outputs=pre_rnn)
-    x_input = Input(batch_shape=batch_input_shape)
-    # TODO(KGF): Ge moved this inside a new conditional in Dec 2019. check
-    # x_in = TimeDistributed(pre_rnn_model)(x_input)
-    if num_1D > 0:
-        x_in = TimeDistributed(pre_rnn_model)(x_input)
-    else:
-        x_in = x_input
-
-    # ==========
-    # TCN MODEL
-    # ==========
-    if ('keras_tcn' in model_conf.keys()
-            and model_conf['keras_tcn'] is True):
-        print('Building TCN model....')
-        tcn_layers = model_conf['tcn_layers']
-        tcn_dropout = model_conf['tcn_dropout']
-        nb_filters = model_conf['tcn_hidden']
-        kernel_size = model_conf['kernel_size_temporal']
-        nb_stacks = model_conf['tcn_nbstacks']
-        use_skip_connections = model_conf['tcn_skip_connect']
-        activation = model_conf['tcn_activation']
-        use_batch_norm = model_conf['tcn_batch_norm']
-        for _ in range(model_conf['tcn_pack_layers']):
-            x_in = TCN(
-                use_batch_norm=use_batch_norm, activation=activation,
-                use_skip_connections=use_skip_connections,
-                nb_stacks=nb_stacks, kernel_size=kernel_size,
-                nb_filters=nb_filters, num_layers=tcn_layers,
-                dropout_rate=tcn_dropout)(x_in)
-            x_in = Dropout(dropout_prob)(x_in)
-    else:  # end TCN model
-        # ==========
-        # RNN MODEL
-        # ==========
-        # LSTM in ONNX: "The maximum opset needed by this model is only 9."
-        rnn_kwargs = dict(return_sequences=return_sequences,
-                          # batch_input_shape=batch_input_shape,
-                          stateful=stateful,
-                          kernel_regularizer=l2(regularization),
-                          recurrent_regularizer=l2(regularization),
-                          bias_regularizer=l2(regularization),
-                          dropout=dropout_prob,
-                          )
-        # https://stackoverflow.com/questions/60468385/is-there-cudnnlstm-or-cudnngru-alternative-in-tensorflow-2-0
-        # https://github.com/tensorflow/tensorflow/blob/r2.1/tensorflow/python/keras/layers/recurrent_v2.py#L902
-        if rnn_type != 'CuDNNLSTM':
-            # Recurrent Dropout is unsupported in CuDNN library
-            rnn_kwargs['recurrent_dropout'] = dropout_prob
-        for _ in range(model_conf['rnn_layers']):
-            x_in = rnn_model(rnn_size, **rnn_kwargs)(x_in)
-            # KGF: is this redundant with the dropout within the LSTM cell?
-            x_in = Dropout(dropout_prob)(x_in)
-        if return_sequences:
-            x_out = TimeDistributed(
-                Dense(1, activation=output_activation))(x_in)
-    model = tf.keras.Model(inputs=x_input, outputs=x_out)
-    model.reset_states()
-    return model
-
-
- class LossHistory(Callback):
+class LossHistory(Callback):
     def on_train_begin(self, logs=None):
         self.losses = []
 
