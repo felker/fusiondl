@@ -1,4 +1,4 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 import os
 import sys
 import time
@@ -29,7 +29,8 @@ class trainercore(ABC):
     be overridden for a particular interface is marked and raises
     a NotImplemented error." (not actually true, they just use "pass")
 
-
+    For Python 3.4+, should instead derive class from abc.ABC and mark appropriate methods
+    with @abstractmethod decorator
     '''
 
 
@@ -73,8 +74,11 @@ class trainercore(ABC):
         sys.stdout.write(message + "\n")
         sys.stdout.flush()
 
+    @abstractmethod
     def initialize(self):
-        pass
+        # TODO(KGF): replace abstractmethod bodies from "return" to docstring
+        # with implicit "return None"
+        return
 
     def build_lr_schedule(self, learning_rate_schedule = None):
         # Define the learning rate sequence:
@@ -149,15 +153,17 @@ class trainercore(ABC):
             x * (self.args.run.minibatch_size / self._train_data_size),
             [c(x * (self.args.run.minibatch_size / self._train_data_size)) for c in cond_list], func_list)
 
-
+    @abstractmethod
     def build_model(self):
-        pass
+        return
 
+    @abstractmethod
     def print_model_info(self):
-        pass
+        return
 
+    @abstractmethod
     def set_compute_parameters(self):
-        pass
+        return
 
 
     def log(self, metrics, kind, step):
@@ -181,33 +187,40 @@ class trainercore(ABC):
 
         return
 
+    @abstractmethod
     def on_step_end(self):
-        pass
+        return
 
+    @abstractmethod
     def on_epoch_end(self):
-        pass
+        return
 
     def metrics(self, metrics):
         # This function looks useless, but it is not.
         # It allows a handle to the distributed network to allreduce metrics.
         return metrics
 
+    @abstractmethod
     def stop(self):
         # Mostly, this is just turning off the io:
         # self._larcv_interface.stop()
-        pass
+        return
 
+    @abstractmethod
     def close_savers(self):
-        pass
+        return
 
+    @abstractmethod
     def save_model_weights(self, model, epoch):
-        pass
+        return
 
+    @abstractmethod
     def get_save_path(self, epoch, ext='h5'):
-        pass
+        return
 
+    @abstractmethod
     def extract_id_and_epoch_from_filename(self, filename):
-        pass
+        return
 
     def delete_model_weights(self, model, epoch):
         save_path = self.get_save_path(epoch)
@@ -368,8 +381,6 @@ class trainercore(ABC):
                 if a < prob*100:
                     X[i, :, j] = 0.0
         return X
-
-
 
 
 def makedirs_process_safe(dirpath):
