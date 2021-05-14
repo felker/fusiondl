@@ -5,6 +5,7 @@ import copy
 # import pickle
 # dill.settings['protocol'] = 3
 
+# TODO(KGF): consider eliminating utils/ directory and moving into core
 
 def general_object_hash(o):
     """

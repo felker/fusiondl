@@ -20,6 +20,7 @@ import pathlib
 # _initialize_io, batch_process, lr schedule, build_lr_schedule, log
 # are the only functions in the base class doing any heavy lifting
 
+# TODO(KGF): consider moving this from core/ to trainers/
 
 class trainercore(ABC):
     '''

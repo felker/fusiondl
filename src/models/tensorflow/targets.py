@@ -1,5 +1,5 @@
 import numpy as np
-import abc
+from abc import ABC, abstractmethod
 
 from src.utils.evaluation import (
     mse_np, binary_crossentropy_np, hinge_np,
@@ -12,16 +12,16 @@ from tensorflow.keras.losses import hinge
 
 
 # Requirement: larger value must mean disruption more likely.
-class Target(object):
+class Target(ABC):
     activation = 'linear'
     loss = 'mse'
 
-    @abc.abstractmethod
+    @abstractmethod
     def loss_np(y_true, y_pred):
         from plasma.conf import conf
         return conf['model']['loss_scale_factor']*mse_np(y_true, y_pred)
 
-    @abc.abstractmethod
+    @abstractmethod
     def remapper(ttd, T_warning):
         # TODO(KGF): base class directly uses ttd=log(TTD+dt/10) quantity
         return -ttd
