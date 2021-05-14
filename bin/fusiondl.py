@@ -27,7 +27,7 @@ from src.config.conf_parser import read_parameters
 # set PRNG seed, unique for each worker, based on MPI task index for
 # reproducible shuffling in guranteed_preprocessed() and training steps
 np.random.seed(g.task_index)
-random.seed(g.task_index)
+# random.seed(g.task_index)
 
 
 def is_valid_file(parser, arg):
@@ -148,8 +148,8 @@ def make_trainer(conf):
 
 
 def train(conf, trainer):
-
-
+    trainer.initialize()
+    trainer.batch_process()
 
 
 def main():
@@ -161,7 +161,7 @@ def main():
         g.print_unique(f"Loading configuration from {g.conf_file}")
         conf = read_parameters(g.conf_file)
     elif os.path.exists('./conf.yaml'):
-        g.print_unique(f"Loading configuration from {./conf.yaml}")
+        g.print_unique("Loading configuration from ./conf.yaml")
         conf = read_parameters('./conf.yaml')
     else:
         raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT),

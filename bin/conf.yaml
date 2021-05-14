@@ -26,7 +26,7 @@ paths:
   shot_list_dir: '/shot_lists/'
   tensorboard_save_path: '/Graph/'
 data:
-  data: d3d_0D
+  dataset: d3d_0D
   specific_signals: []
   bleed_in: 0
   bleed_in_repeat_fac: 1
