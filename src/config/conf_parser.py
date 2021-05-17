@@ -9,6 +9,12 @@ import yaml
 
 def read_parameters(input_file):
     """Parse yaml file of configuration parameters."""
+
+    from src.models.targets import (
+        HingeTarget, MaxHingeTarget, BinaryTarget,
+        LogTTDTarget, TTDInvTarget, TTDLinearTarget
+        )
+
     with open(input_file, 'r') as yaml_file:
         params = yaml.load(yaml_file, Loader=yaml.SafeLoader)
         params['user_name'] = getpass.getuser()
@@ -52,23 +58,14 @@ def read_parameters(input_file):
         params['paths']['global_normalizer_path'] = (
             base_path
             + '/normalization/normalization_signal_group_{}.npz'.format(h))
-        if params['training']['hyperparam_tuning']:
-            # params['paths']['saved_shotlist_path'] =
-            # './normalization/shot_lists.npz'
-            params['paths']['normalizer_path'] = (
-                './normalization/normalization_signal_group_{}.npz'.format(h))
-            params['paths']['model_save_path'] = './model_checkpoints/'
-            params['paths']['csvlog_save_path'] = './csv_logs/'
-            params['paths']['results_prepath'] = './results/'
-        else:
-            # params['paths']['saved_shotlist_path'] = output_path +
-            # '/normalization/shot_lists.npz'
-            params['paths']['normalizer_path'] = (
-                params['paths']['global_normalizer_path'])
-            params['paths']['model_save_path'] = (output_path
-                                                  + '/model_checkpoints/')
-            params['paths']['csvlog_save_path'] = output_path + '/csv_logs/'
-            params['paths']['results_prepath'] = output_path + '/results/'
+        # params['paths']['saved_shotlist_path'] = output_path +
+        # '/normalization/shot_lists.npz'
+        params['paths']['normalizer_path'] = (
+            params['paths']['global_normalizer_path'])
+        params['paths']['model_save_path'] = (output_path
+                                              + '/model_checkpoints/')
+        params['paths']['csvlog_save_path'] = output_path + '/csv_logs/'
+        params['paths']['results_prepath'] = output_path + '/results/'
         params['paths']['tensorboard_save_path'] = (
             output_path + params['paths']['tensorboard_save_path'])
         params['paths']['saved_shotlist_path'] = (
@@ -77,29 +74,24 @@ def read_parameters(input_file):
             + '/shot_lists_signal_group_{}.npz'.format(h))
         params['paths']['processed_prepath'] = (
             base_path + '/processed_shots/' + 'signal_group_{}/'.format(h))
-        # ensure shallow model has +1 -1 target.
-        if params['model']['shallow'] or params['target'] == 'hinge':
-            params['data']['target'] = HingeTarget
-        elif params['target'] == 'maxhinge':
+        # TODO(KGF): problem with overwriting the dict string with class, in place?
+        if params['model']['target'] == 'hinge':
+            params['model']['target'] = HingeTarget
+        elif params['model']['target'] == 'maxhinge':
             MaxHingeTarget.fac = params['data']['positive_example_penalty']
-            params['data']['target'] = MaxHingeTarget
-        elif params['target'] == 'binary':
-            params['data']['target'] = BinaryTarget
-        elif params['target'] == 'ttd':
-            params['data']['target'] = TTDTarget
-        elif params['target'] == 'ttdinv':
-            params['data']['target'] = TTDInvTarget
-        elif params['target'] == 'ttdlinear':
-            params['data']['target'] = TTDLinearTarget
+            params['model']['target'] = MaxHingeTarget
+        elif params['model']['target'] == 'binary':
+            params['model']['target'] = BinaryTarget
+        elif params['model']['target'] == 'ttd':
+            params['model']['target'] = TTDTarget
+        elif params['model']['target'] == 'ttdinv':
+            params['model']['target'] = TTDInvTarget
+        elif params['model']['target'] == 'ttdlinear':
+            params['model']['target'] = TTDLinearTarget
         else:
             # TODO(KGF): "Target" base class is unused here
             g.print_unique('Unknown type of target. Exiting')
             exit(1)
-
-        # params['model']['output_activation'] =
-        # params['data']['target'].activation
-        # binary crossentropy performs slightly better?
-        # params['model']['loss'] = params['data']['target'].loss
 
         # signals
         if params['data']['dataset'] in ['d3d_data_max_tol', 'd3d_data_garbage']:
@@ -435,19 +427,19 @@ def read_parameters(input_file):
                 params['data']['dataset']))
             exit(1)
 
-        if len(params['paths']['specific_signals']):
-            for s in params['paths']['specific_signals']:
+        if len(params['data']['specific_signals']):
+            for s in params['data']['specific_signals']:
                 if s not in params['paths']['use_signals_dict'].keys():
                     g.print_unique(
                         "Signal {} is not fully defined for {} machine. ",
                         "Skipping...".format(
                             s, params['data']['dataset'].split("_")[0]))
-            params['paths']['specific_signals'] = list(
+            params['data']['specific_signals'] = list(
                 filter(
                     lambda x: x in params['paths']['use_signals_dict'].keys(),
-                    params['paths']['specific_signals']))
+                    params['data']['specific_signals']))
             selected_signals = {k: params['paths']['use_signals_dict'][k]
-                                for k in params['paths']['specific_signals']}
+                                for k in params['data']['specific_signals']}
             params['paths']['use_signals'] = sort_by_channels(
                 list(selected_signals.values()))
         else:

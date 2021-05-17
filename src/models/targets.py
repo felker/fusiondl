@@ -1,14 +1,41 @@
 import numpy as np
 from abc import ABC, abstractmethod
 
-from src.utils.evaluation import (
-    mse_np, binary_crossentropy_np, hinge_np,
-    )
-import tensorflow as tf  # noqa
-from tensorflow.keras.losses import hinge
-
 # remapper() method, used only in normalize.py, implicitly knows the
 # transformation applied to Shot.ttd within Shot.convert_to_ttd()
+epsilon = 1e-7
+
+
+def mae_np(y_true, y_pred):
+    return np.mean(np.abs(y_pred-y_true))
+
+
+def mse_np(y_true, y_pred):
+    return np.mean((y_pred-y_true)**2)
+
+
+def binary_crossentropy_np(y_true, y_pred):
+    y_pred = np.clip(y_pred, epsilon, 1-epsilon)
+    return np.mean(- (y_true*np.log(y_pred) + (1-y_true)*np.log(1 - y_pred)))
+
+
+def hinge_np(y_true, y_pred):
+    return np.mean(np.maximum(0.0, 1 - y_pred*y_true))
+
+
+def squared_hinge_np(y_true, y_pred):
+    return np.mean(np.maximum(0.0, 1 - y_pred*y_true)**2)
+
+
+# TODO(KGF): relocate or eliminate these:
+
+# def get_loss_from_list(y_pred_list, y_true_list, target):
+#     return np.mean([get_loss(yg, yp, target)
+#                     for yp, yg in zip(y_pred_list, y_true_list)])
+
+
+# def get_loss(y_true, y_pred, target):
+#     return target.loss_np(y_true, y_pred)
 
 
 # Requirement: larger value must mean disruption more likely.
@@ -127,9 +154,9 @@ class MaxHingeTarget(Target):
         # return weight_mask*squared_hinge(y_true, y_pred1)
 
         # KGF: this is the only place where tensorflow.keras.losses.hinge()
-        # is used in this file
+        # was used in this file
         return conf['model']['loss_scale_factor'] * \
-            overall_fac*weight_mask*hinge(y_true, y_pred1)
+            overall_fac*weight_mask*hinge_np(y_true, y_pred1)
 
     @staticmethod
     def loss_np(y_true, y_pred):
