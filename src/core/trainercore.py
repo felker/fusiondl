@@ -4,13 +4,13 @@ import sys
 import time
 import tempfile
 import copy
-
-from collections import OrderedDict
-
 import numpy
-
 import datetime
 import pathlib
+
+from src.core.processing import makedirs_process_safe
+
+from collections import OrderedDict
 
 # KGF: this class has about half as many methods as the derived TF class
 
@@ -382,17 +382,3 @@ class trainercore(ABC):
                 if a < prob*100:
                     X[i, :, j] = 0.0
         return X
-
-
-def makedirs_process_safe(dirpath):
-    try:  # can lead to race condition
-        os.makedirs(dirpath)
-    except OSError as e:
-        # File exists, and it's a directory, another process beat us to
-        # creating this dir, that's OK.
-        if e.errno == errno.EEXIST:
-            pass
-        else:
-            # Our target dir exists as a file, or different error, reraise the
-            # error!
-            raise

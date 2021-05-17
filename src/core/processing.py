@@ -3,6 +3,20 @@ import os
 import numpy as np
 
 
+def makedirs_process_safe(dirpath):
+    try:  # can lead to race condition
+        os.makedirs(dirpath)
+    except OSError as e:
+        # File exists, and it's a directory, another process beat us to
+        # creating this dir, that's OK.
+        if e.errno == errno.EEXIST:
+            pass
+        else:
+            # Our target dir exists as a file, or different error, reraise the
+            # error!
+            raise
+
+
 def time_sensitive_interp(x, t, t_new):
     indices = np.maximum(0, np.searchsorted(t, t_new, side='right')-1)
     return x[indices]

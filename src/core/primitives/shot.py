@@ -1,13 +1,3 @@
-'''
-#########################################################
-This file containts classes to handle data processing
-
-Author: Julian Kates-Harbeck, jkatesharbeck@g.harvard.edu
-
-This work was supported by the DOE CSGF program.
-#########################################################
-'''
-
 import os
 import os.path
 import sys
@@ -16,9 +6,8 @@ import numpy as np
 
 from src.core.processing import (
     train_test_split, cut_and_resample_signal,
-    get_individual_shot_file
+    get_individual_shot_file, makedirs_process_safe
     )
-from src.core.downloading import makedirs_process_safe
 from src.core.hashing import myhash
 
 
@@ -47,7 +36,6 @@ class ShotListFiles(object):
     def get_shot_numbers_and_disruption_times(self):
         all_shots = []
         all_disruption_times = []
-        # all_machines_arr = []
         for path in self.paths:
             full_path = self.prepath + path
             shots, disruption_times = (
@@ -69,7 +57,7 @@ class ShotList(object):
 
     def __init__(self, shots=None):
         '''
-        A ShotList is a list of 2D Numpy arrays.
+        A ShotList is a list of 2D NumPy arrays.
         '''
         self.shots = []
         if shots is not None:
@@ -273,7 +261,7 @@ class Shot(object):
     Each shot is a measurement of plasma properties (current, locked mode
     amplitude, etc.) as a function of time.
 
-    For 0D data, each shot is modeled as a 2D Numpy array - time vs a plasma
+    For 0D data, each shot is modeled as a 2D NumPy array - time vs. a plasma
     property.
 
     Attributes:
@@ -521,6 +509,7 @@ class Shot(object):
         ttd = np.log10(ttd + 1.0*dt/10)
         return ttd
 
+    # TODO(KGF): unclear if/where this save() method is called
     def save(self, prepath):
         makedirs_process_safe(prepath)
         save_path = self.get_save_path(prepath)

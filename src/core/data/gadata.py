@@ -1,6 +1,5 @@
 import MDSplus
 import numpy
-# import time
 
 
 class gadata:
@@ -21,7 +20,6 @@ class gadata:
         self.connection = connection
 
         # Retrieve Data
-        # t0 = time.time()
         self.found = False
 
         # Create the MDSplus connection (thin) if not passed in
@@ -82,7 +80,7 @@ class gadata:
                 print(e)
                 pass
 
-            # Retrieve data from PTDATA if node not found
+        # Retrieve data from PTDATA if node not found
         if not self.found:
             # print('Trying ptdata: %s' % (signal,))
             self.zdata = self.connection.get(
@@ -92,7 +90,7 @@ class gadata:
                 self.rank = 1
                 self.found = True
 
-            # Retrieve data from Pseudo-pointname if not in ptdata
+        # Retrieve data from Pseudo-pointname if not in ptdata
         if not self.found:
             # print('   Signal not in PTDATA: %s' % (signal,))
             self.zdata = self.connection.get(
