@@ -8,19 +8,18 @@ This work was supported by the DOE CSGF program.
 #########################################################
 '''
 
-from __future__ import print_function
 import os
 import os.path
 import sys
 import random as rnd
 import numpy as np
 
-from plasma.utils.processing import (
+from src.core.processing import (
     train_test_split, cut_and_resample_signal,
     get_individual_shot_file
     )
-from plasma.utils.downloading import makedirs_process_safe
-from plasma.utils.hashing import myhash
+from src.core.downloading import makedirs_process_safe
+from src.core.hashing import myhash
 
 
 class ShotListFiles(object):

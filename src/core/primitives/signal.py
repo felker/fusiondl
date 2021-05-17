@@ -1,13 +1,12 @@
-from __future__ import division
 import numpy as np
 import sys
 import os
 import re
 
 from scipy.interpolate import UnivariateSpline
-from plasma.utils.processing import get_individual_shot_file
-from plasma.utils.downloading import get_missing_value_array
-from plasma.utils.hashing import myhash
+from src.core.processing import get_individual_shot_file
+from src.core.downloading import get_missing_value_array
+from src.core.hashing import myhash
 
 
 class Signal(object):

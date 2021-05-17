@@ -1,9 +1,8 @@
-from __future__ import print_function
 import plasma.global_vars as g
 import numpy as np
 import sys
 
-from plasma.primitives.data import (
+from src.core.primitives.data import (
     Signal, ProfileSignal, ChannelSignal, Machine
     )
 
@@ -17,7 +16,7 @@ def create_missing_value_filler():
 def get_tree_and_tag(path):
     if '/' not in path:
         return None, '\\' + path
-    
+
     spl = path.split('/')
     tree = spl[0]
     tag = '\\' + spl[1]
@@ -27,7 +26,7 @@ def get_tree_and_tag(path):
 def get_tree_and_tag_no_backslash(path):
     if '/' not in path:
         return None, path
-    
+
     spl = path.split('/')
     tree = spl[0]
     tag = spl[1]
