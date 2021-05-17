@@ -44,9 +44,8 @@ class Target(ABC):
     loss = 'mse'
 
     @abstractmethod
-    def loss_np(y_true, y_pred):
-        from plasma.conf import conf
-        return conf['model']['loss_scale_factor']*mse_np(y_true, y_pred)
+    def loss_np(y_true, y_pred, loss_scale_factor):
+        return loss_scale_factor*mse_np(y_true, y_pred)
 
     @abstractmethod
     def remapper(ttd, T_warning):
@@ -59,10 +58,8 @@ class BinaryTarget(Target):
     loss = 'binary_crossentropy'
 
     @staticmethod
-    def loss_np(y_true, y_pred):
-        from plasma.conf import conf
-        return (conf['model']['loss_scale_factor']
-                * binary_crossentropy_np(y_true, y_pred))
+    def loss_np(y_true, y_pred, loss_scale_factor):
+        return loss_scale_factor*binary_crossentropy_np(y_true, y_pred)
 
     @staticmethod
     def remapper(ttd, T_warning, as_array_of_shots=True):
@@ -79,9 +76,8 @@ class LogTTDTarget(Target):
     loss = 'mse'
 
     @staticmethod
-    def loss_np(y_true, y_pred):
-        from plasma.conf import conf
-        return conf['model']['loss_scale_factor']*mse_np(y_true, y_pred)
+    def loss_np(y_true, y_pred, loss_scale_factor):
+        return loss_scale_factor*mse_np(y_true, y_pred)
 
     @staticmethod
     def remapper(ttd, T_warning):
@@ -95,7 +91,7 @@ class TTDInvTarget(Target):
     loss = 'mse'
 
     @staticmethod
-    def loss_np(y_true, y_pred):
+    def loss_np(y_true, y_pred, loss_scale_factor):
         return mse_np(y_true, y_pred)
 
     @staticmethod
@@ -113,9 +109,8 @@ class TTDLinearTarget(Target):
     loss = 'mse'
 
     @staticmethod
-    def loss_np(y_true, y_pred):
-        from plasma.conf import conf
-        return conf['model']['loss_scale_factor']*mse_np(y_true, y_pred)
+    def loss_np(y_true, y_pred, loss_scale_factor):
+        return loss_scale_factor*mse_np(y_true, y_pred)
 
     @staticmethod
     def remapper(ttd, T_warning):
@@ -136,9 +131,8 @@ class MaxHingeTarget(Target):
     fac = 1.0
 
     @staticmethod
-    def loss(y_true, y_pred):
+    def loss(y_true, y_pred, loss_scale_factor):
         # TODO(KGF): this function is unused and unique to this class
-        from plasma.conf import conf
         fac = MaxHingeTarget.fac
         # overall_fac =
         # np.prod(np.array(K.shape(y_pred)[1:]).astype(np.float32))
@@ -155,12 +149,10 @@ class MaxHingeTarget(Target):
 
         # KGF: this is the only place where tensorflow.keras.losses.hinge()
         # was used in this file
-        return conf['model']['loss_scale_factor'] * \
-            overall_fac*weight_mask*hinge_np(y_true, y_pred1)
+        return loss_scale_factor*overall_fac*weight_mask*hinge_np(y_true, y_pred1)
 
     @staticmethod
-    def loss_np(y_true, y_pred):
-        from plasma.conf import conf
+    def loss_np(y_true, y_pred, loss_scale_factor):
         # TODO(KGF): fac = positive_example_penalty is only used in this class,
         # only in above (unused) loss() fn, which only this class has, and is
         # never called. 2 lines related to fac commented-out in this fn.
@@ -181,7 +173,7 @@ class MaxHingeTarget(Target):
         # , axis=-1)
         # only during training, here we want to completely sum up over all
         # instances
-        return (conf['model']['loss_scale_factor']
+        return (loss_scale_factor
                 * np.mean(overall_fac * weight_mask
                           * np.maximum(1. - y_true * y_pred, 0.)))
 
@@ -200,10 +192,8 @@ class HingeTarget(Target):
     loss = 'hinge'
 
     @staticmethod
-    def loss_np(y_true, y_pred):
-        from plasma.conf import conf
-        return conf['model']['loss_scale_factor']*hinge_np(y_true, y_pred)
-        # return squared_hinge_np(y_true, y_pred)
+    def loss_np(y_true, y_pred, loss_scale_factor):
+        return loss_scale_factor*hinge_np(y_true, y_pred)
 
     @staticmethod
     def remapper(ttd, T_warning, as_array_of_shots=True):

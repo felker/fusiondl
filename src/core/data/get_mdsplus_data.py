@@ -1,6 +1,8 @@
-from plasma.utils.downloading import download_all_shot_numbers
-from plasma.conf import conf
+from src.utils.downloading import download_all_shot_numbers
 
+# TODO(KGF): decide what to do with this file and downloading.py which isnt yet in this
+# repo. Main training/inference code should never automatically download signal data. Move
+# this file to top level bin/ subdir? Needs to process conf.yaml
 
 prepath = '/p/datad2/'  # '/cscratch/share/frnn/'
 shot_numbers_path = 'shot_lists/'

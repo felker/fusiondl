@@ -1,4 +1,4 @@
-import plasma.global_vars as g
+import src.global_vars as g
 import numpy as np
 import sys
 
