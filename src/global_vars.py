@@ -4,11 +4,11 @@ import sys
 comm = None
 task_index = 0
 num_workers = 1
-NUM_GPUS = 0
+NUM_GPUS_PER_NODE = 0
 MY_GPU = 0
-# TODO(KGF): remove this (and all?) references to Keras backend
-backend = ''
+framework = ''
 tf_ver = None
+torch_ver = None
 conf_file = None
 conf = None
 
@@ -20,11 +20,11 @@ def init_MPI():
     num_workers = comm.Get_size()
 
 
-def init_GPU_backend(conf):
-    global NUM_GPUS, MY_GPU, backend
-    NUM_GPUS = conf['num_gpus']
-    MY_GPU = task_index % NUM_GPUS
-    backend = conf['model']['backend']
+def init_GPU_env(conf):
+    global NUM_GPUS_PER_NODE, MY_GPU, framework
+    NUM_GPUS_PER_NODE = conf['num_gpus_per_node']
+    MY_GPU = task_index % NUM_GPUS_PER_NODE
+    framework = conf['framework']
 
 
 def pprint_unique(obj):

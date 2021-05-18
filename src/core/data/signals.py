@@ -2,9 +2,12 @@ import src.global_vars as g
 import numpy as np
 import sys
 
-from src.core.primitives.data import (
+from src.core.primitives.signal import (
     Signal, ProfileSignal, ChannelSignal, Machine
     )
+
+# TODO(KGF): rename this file to disambiguate it from primtives/signal.py (formerly
+# data.py). "tokamak_signals.py"?
 
 
 def create_missing_value_filler():

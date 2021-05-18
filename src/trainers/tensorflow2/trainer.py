@@ -1,11 +1,9 @@
 import src.global_vars as g
-from src.utils.processing import concatenate_sublists
-from src.utils.evaluation import get_loss_from_list
-
+from src.core.processing import concatenate_sublists
 from src.core.trainercore import trainercore, makedirs_process_safe
-from src.utils.hashing import general_object_hash
+from src.core.hashing import general_object_hash
 
-from src.models.tensorflow import custom_loss, targets, input_1D
+from src.models.tensorflow import custom_loss, input_1D
 from src.models.tensorflow.tcn import TCN
 # from src.models.loader import ProcessGenerator
 # from src.utils.state_reset import reset_states
@@ -19,9 +17,10 @@ import numpy as np
 from copy import deepcopy
 from functools import partial
 from tqdm import tqdm
-
+from pkg_resources import parse_version, get_distribution, DistributionNotFound
 
 import tensorflow as tf
+from tensorflow.keras.callbacks import Callback
 from tensorflow.python.client import timeline
 
 # TODO(KGF): consider using importlib.util.find_spec() instead (Py>3.4)
@@ -35,28 +34,23 @@ except ImportError:  # as e:
 else:
     _has_onnx = True
 
-# Synchronize 2x stderr msg from TensorFlow initialization via Keras backend
+# Synchronize 2x stderr msg from TensorFlow initialization:
 # "Succesfully opened dynamic library... libcudart" "Using TensorFlow backend."
 if g.comm is not None:
     g.flush_all_inorder()
 
 # set global variables for entire module regarding MPI & GPU environment
-g.init_GPU_backend(conf)
-# moved this fn/init call to client-facing mpi_learn.py
-# g.init_MPI()
-# TODO(KGF): set "mpi_initialized" global bool flag?
-
+g.init_GPU_env(g.conf)
 g.flush_all_inorder()   # see above about conf_parser.py stdout writes
 
 # initialization code for mpi_runner.py module:
-if g.NUM_GPUS > 1:
+if g.NUM_GPUS_PER_NODE > 1:
     os.environ['CUDA_VISIBLE_DEVICES'] = '{}'.format(g.MY_GPU)
-    # ,mode=NanGuardMode'
 
 # "tensorflow" package on PyPI has GPU support as of 2.1.0
 g.tf_ver = parse_version(get_distribution('tensorflow').version)
 
-
+# TODO(KGF): move this to another file
 class Averager(object):
     """Compute and store a cumulative moving average (CMA).
 
@@ -72,6 +66,16 @@ class Averager(object):
 
     def get_ave(self):
         return self.cma
+
+
+# TODO(KGF): relocate or eliminate these:
+def get_loss_from_list(y_pred_list, y_true_list, target):
+    return np.mean([get_loss(yg, yp, target)
+                    for yp, yg in zip(y_pred_list, y_true_list)])
+
+
+def get_loss(y_true, y_pred, target):
+    return target.loss_np(y_true, y_pred)
 
 
 class tf_trainer(trainercore):
@@ -907,9 +911,6 @@ class TensorBoard(object):
     def __init__(self, log_dir='./logs', histogram_freq=0, validation_steps=0,
                  # write_graph=True,
                  write_grads=False):
-        if K.backend() != 'tensorflow':
-            raise RuntimeError('TensorBoard callback only works '
-                               'with the TensorFlow backend.')
         self.log_dir = log_dir
         self.histogram_freq = histogram_freq
         self.writer = None
