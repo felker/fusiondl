@@ -5,8 +5,11 @@ import re
 
 from scipy.interpolate import UnivariateSpline
 from src.core.processing import get_individual_shot_file
-from src.core.downloading import get_missing_value_array
 from src.core.hashing import myhash
+
+
+def get_missing_value_array():
+    return np.array([-1.0])
 
 
 class Signal(object):

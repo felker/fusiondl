@@ -1,7 +1,7 @@
 import src.global_vars as g
 from src.core.primitives.shot import ShotListFiles
 import src.core.data.signals as sig
-from src.utils.hashing import myhash_signals
+from src.core.hashing import myhash_signals
 import os
 import getpass
 import yaml

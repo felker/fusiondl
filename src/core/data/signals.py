@@ -3,8 +3,9 @@ import numpy as np
 import sys
 
 from src.core.primitives.signal import (
-    Signal, ProfileSignal, ChannelSignal, Machine
+    Signal, ProfileSignal, ChannelSignal
     )
+from src.core.primitives.machine import Machine
 
 # TODO(KGF): rename this file to disambiguate it from primtives/signal.py (formerly
 # data.py). "tokamak_signals.py"?
